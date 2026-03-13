@@ -1,0 +1,16 @@
+# UE5 build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.sln
+*.xcworkspace
+*.xcodeproj
+
+# OS
+.DS_Store
+Thumbs.db

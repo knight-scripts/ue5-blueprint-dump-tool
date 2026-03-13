@@ -1,0 +1,18 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Blueprint Dump Tool",
+	"Description": "Console commands to dump AnimBP and Blueprint structure to human-readable text files. DumpAnimBP dumps pose chains, state machines, variables, EventGraph, functions, and animation layers. DumpBP dumps components, variables, EventGraph, and functions.",
+	"Category": "Editor",
+	"CreatedBy": "knight-scripts",
+	"CreatedByURL": "https://github.com/knight-scripts/ue5-blueprint-dump-tool",
+	"EngineVersion": "5.7.0",
+	"Modules": [
+		{
+			"Name": "BlueprintDumpTool",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	]
+}
