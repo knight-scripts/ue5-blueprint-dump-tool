@@ -54,6 +54,13 @@ Understanding why some dumps show rich function bodies and others show empty sec
 
 ## Phase 0 — Correctness fixes (DO FIRST, before Milestone 1)
 
+> **✅ ALL of Phase 0 (0.1–0.9) LANDED 2026-07-06** — plus the Blend Stack cluster
+> (1.5b A/B/C, 1.1b, 1.2b) from M1, which is independent of the expression walker.
+> See changelog. **Verification pending**: in-editor re-dump on machine 2 against the
+> acceptance checklist. During implementation a 4th unchecked `LinkedTo[0]` site was
+> found and fixed (0.7): `WalkExecChain`'s VariableSet special case, plus its
+> null-`SourceNode` title deref.
+
 **Core conclusion:** the tool is solid, but one correctness bug already corrupts dump output
 today (false `(cycle)` on shared nodes) and it sits directly under Milestone 1. These fixes
 land before M1.
@@ -507,6 +514,36 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-06 — Phase 0 complete + Blend Stack fidelity cluster
+All of Phase 0, in one commit (signature changes thread through all walkers):
+- **0.1** `BuildExpressionFromPin` visited set REMOVED — data graphs are DAGs, `MaxDepth`
+  is the only bound; shared Get nodes no longer print `(cycle)`
+- **0.8** nested operator results parenthesized (`Grouped` at depth > 0); fabricated `0`
+  operand → `?` (Phase 2 nit, same line)
+- **0.2** exec knot cycle check moved BEFORE knot pass-through (crash fix)
+- **0.3** node budget (2000/walk) in both walkers, `(truncated: node budget reached)`
+- **0.4** `[DISABLED]` annotation: pose walker, exec walker, event headers, transitions
+- **0.5** main AnimGraph = top-level graph named `AnimGraph`, fallback first top-level,
+  then first any
+- **0.6** pose-chain revisits print `(-> see above: <label>)`
+- **0.7** null-guarded `LinkedTo[0]` at all sites incl. the 4th (VariableSet case in
+  `WalkExecChain` + its `SourceNode` title deref)
+- **0.9** `(unresolved)` vs `(automatic)` keyed on `bAutomaticRuleBasedOnSequencePlayerInState`
+
+Blend Stack / anim-node fidelity (M1 1.5b + 1.1b + 1.2b, verified-5.7 APIs):
+- **(A)** `[Settings: ...]` — inner `FAnimNode_*` struct read via `GetFNodeProperty()`,
+  non-default editable properties printed for EVERY anim node (skip transient, pose links,
+  visible-pin duplicates, title-riding asset refs); Blend Stack always shows
+  `MaxActiveBlends`/`bUseInertialBlend`/`BlendTime`/`BlendProfile`
+- **(B)** `Pin=[bound: Path]` — pin property bindings read reflectively from the node's
+  `Binding` object (`PropertyBindings` map; value struct is public, impl header stays
+  un-included); bound pins print the binding INSTEAD of the stale default
+- **(C)** `[OnUpdate: Fn]` / `[OnBecomeRelevant: Fn]` / `[OnInitialUpdate: Fn]` after node
+  labels — the three `FMemberReference` members are public, read directly (simpler than
+  the planned `GetBoundFunctionsInfo` route)
+- **Sub-graphs**: `WalkPoseChain` recurses `UEdGraphNode::GetSubGraphs()` (generic; SM and
+  linked-layer nodes excluded) → Blend Stack per-sample graph no longer a mute dead-end
 
 ### Commit 1acb266 — Fix 4 Data Gaps
 - Recursive expression resolution in `GetDataInputSummary` (depth 4 for data pins)
