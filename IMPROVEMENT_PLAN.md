@@ -11,10 +11,11 @@
 > workload, and the Phase 0 fixes determine whether that work produces truth or noise.
 > Speculative "grow it into a product" ideas are parked as one-liners at the end.
 >
-> **Copies:** this plugin has a canonical standalone repo and may be copied into a host
-> project's `Plugins/` folder for in-editor testing. There is no submodule/symlink —
-> changes must be mirrored manually between copies. Develop in the standalone repo, copy
-> into the host project to test.
+> **Copies:** the canonical home is this standalone repo. The host project embeds it as a
+> **git subtree** at `Plugins/BlueprintDumpTool` (converted 2026-07-06 — no more manual
+> mirroring). Develop and commit HERE, then sync into the host with
+> `git subtree pull --prefix=Plugins/BlueprintDumpTool <path-to-this-repo> main --squash`.
+> Never edit the embedded copy directly.
 
 ## Current State (v1.0 — commit 19e210f)
 
