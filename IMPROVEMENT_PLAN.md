@@ -125,13 +125,13 @@ something is there; annotation preserves the full picture).
 ### 0.5 Main AnimGraph selection is order-dependent
 **File:** `AnimBPDumper.cpp:156-164`
 
-Takes the FIRST `UAnimationGraph` from `GetAllGraphs()`. In monolithic ABPs, self-linked
-layer graphs are ALSO `UAnimationGraph` with the same outer — if one precedes the main
-graph in creation order, the dump presents a layer as "the AnimGraph" and files the real
-one under "Layer Functions". Has held on ALS/GASP so far by luck.
+Takes the FIRST `UAnimationGraph` from `GetAllGraphs()` with **no filter at all** (verified
+in-code 2026-07-06). In monolithic ABPs, self-linked layer graphs are ALSO `UAnimationGraph`
+— and because `GetAllGraphs()` includes sub-graphs, the first match can be a layer graph *or
+even a state's nested bound sub-graph*, not just "a layer". Has held on ALS/GASP so far by luck.
 
-**Fix:** prefer name-based selection (`Graph->GetFName() == TEXT("AnimGraph")`), keep
-current first-match as fallback.
+**Fix:** name-based **and** top-level-scoped selection (`Graph->GetFName() == TEXT("AnimGraph")`
+AND `Outer == AnimBP || GeneratedClass`), keep current first-match as fallback.
 
 ### 0.6 Silent omission on pose-chain revisits
 **File:** `AnimBPDumper.cpp:260-263` (+ pin-label print at `:320-323`)
@@ -150,6 +150,35 @@ Stale/null link entries exist in mildly corrupted assets. The walkers null-check
 (`LinkedPin && LinkedPin->GetOwningNode()`); these three summarizer spots don't.
 
 **Fix:** same null-check pattern at all three sites.
+
+### 0.8 Missing parentheses corrupt nested boolean/arithmetic expressions ⚠ pairs with 0.1 (same function)
+**File:** `BlueprintDumpUtils.cpp:502, 546` (operator formatting; also `:506`)
+
+`BuildExpressionFromPin` emits `A op B` with **no grouping**, so a rule authored as
+`bA && (bB || bC)` — structurally `BooleanAND(bA, BooleanOR(bB,bC))` — dumps as
+`bA && bB || bC`, which reads by precedence as `(bA && bB) || bC`: **a different boolean
+condition than the AnimBP evaluates.** Same for arithmetic (`(a+b)*c` → `a+b*c`). Verified
+in-code 2026-07-06.
+
+This hits **transition-rule reconstruction** — the tool's primary output and the exact thing
+ABP-contract checks read (H5/H6 "does state X have edge Y with condition Z"). It is *worse*
+than 0.1's `(cycle)`: 0.1 prints a visible marker, this produces clean-looking output that is
+**silently wrong**. Fires on any rule mixing `&&`/`||` (GASP and any non-trivial SM do this
+constantly). M1's deeper recursion amplifies it.
+
+**Fix:** parenthesize nested operator sub-expressions — wrap an operator result in `(...)`
+when it is an operand of another operator; strip the outermost parens at the top-level call
+site. Do this together with 0.1 (both live in `BuildExpressionFromPin`).
+
+### 0.9 `(automatic)` conflates a genuinely-automatic transition with a parse failure
+**File:** `AnimBPDumper.cpp:460` (+ `BuildTransitionRuleExpression` `:595`)
+
+When `BuildTransitionRuleExpression` returns empty because it **couldn't reconstruct** the
+rule, the caller labels it `(automatic)` — identical to a transition that genuinely has no
+rule. Silence-as-bug-signal: a parse failure is indistinguishable from a real auto-transition.
+
+**Fix:** distinguish the cases — `(unresolved)` when reconstruction failed vs `(automatic)`
+only when `bAutomaticRuleBasedOnSequencePlayerInState` / the logic type actually says so.
 
 ---
 
@@ -439,15 +468,24 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 - Nit: `DumpVariables` labels `CPF_Edit` as "EditAnywhere" — with
   `CPF_DisableEditOnInstance` it's actually EditDefaultsOnly-ish; refine if variable
   dumps get load-bearing.
+- **Fabricated `"0"` operand** (`BlueprintDumpUtils.cpp:504-507`): a binary operator with only
+  one resolved operand emits `"X op 0"`, inventing a value. Rare; emit `?` instead of `0`.
+- **Enum inequality not resolved to `!=`** (`ResolveOperatorFromTitle`): `"Not Equal (Enum)"`
+  → first word `"Not"` misses the operator map → shows function-style `Not Equal (Enum)(A, B)`
+  instead of `A != B`. Readability only.
+- **Dead param**: `DumpStateMachine`'s `Visited` argument is unused (`AnimBPDumper.cpp:336`).
 
 ---
 
 ## Suggested Session Order (near-term Phase 0 / M1 work)
 
-1. **0.1** (false cycle) + regression check: grep old GASP dumps for `(cycle)`, re-dump, diff.
+1. **0.1 + 0.8** (false cycle + missing parens) — **do together, same function
+   (`BuildExpressionFromPin`); these two are what make transition-rule output trustworthy.**
+   Regression check: grep old GASP dumps for `(cycle)`, author a test rule mixing `&&`/`||`,
+   re-dump, diff.
 2. **0.2 + 0.3** (walker safety) — small, same functions.
-3. **0.4** (disabled nodes) + **0.6** (revisit marker) — output fidelity, immediately
-   visible in re-dumps.
+3. **0.4** (disabled nodes) + **0.6** (revisit marker) + **0.9** (`(automatic)` vs
+   `(unresolved)`) — output-fidelity fixes, immediately visible in re-dumps.
 4. **0.5 + 0.7** — robustness one-liners.
 5. Re-dump a representative ABP + one GASP ABP, eyeball diff against a known-good baseline
    (doubles as an overdue re-dump — code has moved since the last baseline).
