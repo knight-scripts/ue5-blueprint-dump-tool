@@ -27,8 +27,9 @@ public:
 	static FString DumpAnimBP(const FString& AssetPath);
 
 private:
-	/** Recursive backward walk through pose link pins from a given node. */
-	static void WalkPoseChain(UEdGraphNode* Node, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited);
+	/** Recursive backward walk through pose link pins from a given node.
+	 *  NodeBudget bounds total nodes per walk (insurance against pathological graphs). */
+	static void WalkPoseChain(UEdGraphNode* Node, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited, int32& NodeBudget);
 
 	/** Dump a state machine: entry state, states, transitions, then each state's content. */
 	static void DumpStateMachine(UAnimGraphNode_StateMachine* SMNode, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited);

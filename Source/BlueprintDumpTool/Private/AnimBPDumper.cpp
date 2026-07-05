@@ -35,6 +35,216 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformFileManager.h"
+#include "UObject/StructOnScope.h"
+#include "UObject/UnrealType.h"
+
+// ============================================================================
+// Anim node fidelity helpers (file-local)
+//
+// Anim graph nodes keep most of their configuration in the inner FAnimNode_*
+// struct behind meta=(PinHiddenByDefault) — no visible pin ever exists, so a
+// pin-only dump silently loses every such setting (Blend Stack is the worst
+// case: ALL of its ~25 settings are hidden pins). These helpers surface:
+//   (A) inner-struct settings that differ from the struct's defaults
+//   (B) pin property bindings (the "Bind" dropdown) — a bound pin's DefaultValue
+//       is stale; runtime reads the bound property instead
+//   (C) member-function bindings (On Initial Update / Become Relevant / Update)
+// ============================================================================
+
+/** (A) Settings from the node's inner FAnimNode_* struct that differ from defaults.
+ *  For Blend Stack nodes a small headline set is always shown, defaults included. */
+static FString FormatAnimNodeSettings(UAnimGraphNode_Base* AnimNode, const FString& NodeLabel)
+{
+	FStructProperty* NodeProp = AnimNode->GetFNodeProperty();
+	if (!NodeProp || !NodeProp->Struct)
+	{
+		return FString();
+	}
+
+	UScriptStruct* NodeStruct = NodeProp->Struct;
+	const void* NodeData = NodeProp->ContainerPtrToValuePtr<void>(AnimNode);
+
+	// Default-constructed instance of the same struct, for diffing
+	FStructOnScope Defaults(NodeStruct);
+	const void* DefaultData = Defaults.GetStructMemory();
+	if (!NodeData || !DefaultData)
+	{
+		return FString();
+	}
+
+	// Blend Stack: its defining settings must be visible even when left at defaults
+	const bool bIsBlendStack = NodeStruct->GetName().StartsWith(TEXT("AnimNode_BlendStack"));
+	static const FName BlendStackAlwaysShow[] =
+		{ TEXT("MaxActiveBlends"), TEXT("bUseInertialBlend"), TEXT("BlendTime"), TEXT("BlendProfile") };
+
+	TArray<FString> Parts;
+	for (TFieldIterator<FProperty> It(NodeStruct); It; ++It)
+	{
+		FProperty* Prop = *It;
+
+		if (Prop->HasAnyPropertyFlags(CPF_Transient))
+		{
+			continue;
+		}
+		if (!Prop->HasAnyPropertyFlags(CPF_Edit))
+		{
+			continue; // only editor-authored settings
+		}
+
+		// Pose links are walked as children, not settings
+		{
+			const FStructProperty* StructProp = CastField<FStructProperty>(Prop);
+			if (const FArrayProperty* ArrayProp = CastField<FArrayProperty>(Prop))
+			{
+				StructProp = CastField<FStructProperty>(ArrayProp->Inner);
+			}
+			if (StructProp && StructProp->Struct->IsChildOf(FPoseLinkBase::StaticStruct()))
+			{
+				continue;
+			}
+		}
+
+		// Properties surfaced as visible pins are already dumped via FormatDataPins
+		bool bHasVisiblePin = false;
+		for (UEdGraphPin* Pin : AnimNode->Pins)
+		{
+			if (Pin && !Pin->bHidden && Pin->PinName == Prop->GetFName())
+			{
+				bHasVisiblePin = true;
+				break;
+			}
+		}
+		if (bHasVisiblePin)
+		{
+			continue;
+		}
+
+		const void* Value = Prop->ContainerPtrToValuePtr<void>(NodeData);
+		const void* DefValue = Prop->ContainerPtrToValuePtr<void>(DefaultData);
+		const bool bDiffers = !Prop->Identical(Value, DefValue, PPF_None);
+
+		bool bForceShow = false;
+		if (bIsBlendStack)
+		{
+			for (const FName& Name : BlendStackAlwaysShow)
+			{
+				if (Prop->GetFName() == Name)
+				{
+					bForceShow = true;
+					break;
+				}
+			}
+		}
+		if (!bDiffers && !bForceShow)
+		{
+			continue;
+		}
+
+		FString ValueStr;
+		if (const FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Prop))
+		{
+			UObject* Obj = ObjProp->GetObjectPropertyValue(Value);
+			ValueStr = Obj ? Obj->GetName() : TEXT("None");
+			// Asset refs that already ride the node title (e.g. SequencePlayer's clip) — skip the duplicate
+			if (Obj && NodeLabel.Contains(ValueStr))
+			{
+				continue;
+			}
+		}
+		else
+		{
+			Prop->ExportTextItem_Direct(ValueStr, Value, nullptr, nullptr, PPF_None);
+		}
+
+		if (ValueStr.Len() > 96)
+		{
+			ValueStr = ValueStr.Left(93) + TEXT("...");
+		}
+		Parts.Add(FString::Printf(TEXT("%s=%s"), *Prop->GetName(), *ValueStr));
+	}
+
+	if (Parts.Num() == 0)
+	{
+		return FString();
+	}
+	return TEXT(" [Settings: ") + FString::Join(Parts, TEXT(", ")) + TEXT("]");
+}
+
+/** (C) On Initial Update / On Become Relevant / On Update member-function bindings. */
+static FString FormatNodeFunctionBindings(UAnimGraphNode_Base* AnimNode)
+{
+	TArray<FString> Parts;
+	auto AddBinding = [&Parts](const TCHAR* Label, const FMemberReference& Ref)
+	{
+		if (!Ref.GetMemberName().IsNone())
+		{
+			Parts.Add(FString::Printf(TEXT("[%s: %s]"), Label, *Ref.GetMemberName().ToString()));
+		}
+	};
+	AddBinding(TEXT("OnInitialUpdate"), AnimNode->InitialUpdateFunction);
+	AddBinding(TEXT("OnBecomeRelevant"), AnimNode->BecomeRelevantFunction);
+	AddBinding(TEXT("OnUpdate"), AnimNode->UpdateFunction);
+
+	if (Parts.Num() == 0)
+	{
+		return FString();
+	}
+	return TEXT(" ") + FString::Join(Parts, TEXT(" "));
+}
+
+/** (B) Pin property bindings ("Bind" dropdown), keyed by property/pin name.
+ *  The binding impl class (UAnimGraphNodeBinding_Base) lives in a Private engine
+ *  header, so its PropertyBindings map is read via reflection; the value struct
+ *  FAnimGraphNodePropertyBinding is public in AnimGraphNode_Base.h. */
+static void CollectPropertyBindings(UEdGraphNode* Node, TMap<FName, FString>& OutBindings)
+{
+	UAnimGraphNode_Base* AnimNode = Cast<UAnimGraphNode_Base>(Node);
+	if (!AnimNode)
+	{
+		return;
+	}
+
+	FObjectProperty* BindingProp = FindFProperty<FObjectProperty>(UAnimGraphNode_Base::StaticClass(), TEXT("Binding"));
+	if (!BindingProp)
+	{
+		return;
+	}
+	UObject* BindingObj = BindingProp->GetObjectPropertyValue_InContainer(AnimNode);
+	if (!BindingObj)
+	{
+		return;
+	}
+
+	FMapProperty* MapProp = FindFProperty<FMapProperty>(BindingObj->GetClass(), TEXT("PropertyBindings"));
+	if (!MapProp || !CastField<FNameProperty>(MapProp->KeyProp))
+	{
+		return;
+	}
+	const FStructProperty* ValueStructProp = CastField<FStructProperty>(MapProp->ValueProp);
+	if (!ValueStructProp || ValueStructProp->Struct->GetFName() != TEXT("AnimGraphNodePropertyBinding"))
+	{
+		return;
+	}
+
+	FScriptMapHelper MapHelper(MapProp, MapProp->ContainerPtrToValuePtr<void>(BindingObj));
+	for (int32 Index = 0; Index < MapHelper.GetMaxIndex(); ++Index)
+	{
+		if (!MapHelper.IsValidIndex(Index))
+		{
+			continue;
+		}
+		const FName PropName = *reinterpret_cast<const FName*>(MapHelper.GetKeyPtr(Index));
+		const FAnimGraphNodePropertyBinding* Binding =
+			reinterpret_cast<const FAnimGraphNodePropertyBinding*>(MapHelper.GetValuePtr(Index));
+
+		FString Path = Binding->PathAsText.ToString();
+		if (Path.IsEmpty())
+		{
+			Path = FString::Join(Binding->PropertyPath, TEXT("."));
+		}
+		OutBindings.Add(PropName, Path);
+	}
+}
 
 // ============================================================================
 // Console command entry point
@@ -152,15 +362,41 @@ FString FAnimBPDumper::DumpAnimBP(const FString& AssetPath)
 	FBlueprintDumpUtils::DumpVariables(AnimBP, Output);
 	FBlueprintDumpUtils::DumpInterfaces(AnimBP, Output);
 
-	// Find the AnimGraph (main animation graph)
+	// Find the AnimGraph (main animation graph).
+	// First-match-wins was order-dependent: in monolithic ABPs, self-linked layer graphs
+	// (and even states' nested bound graphs) are ALSO UAnimationGraph. Prefer the
+	// top-level graph literally named "AnimGraph"; fall back to first top-level, then first any.
 	UEdGraph* AnimGraph = nullptr;
+	UEdGraph* FirstTopLevelAnimationGraph = nullptr;
+	UEdGraph* FirstAnimationGraph = nullptr;
 	for (UEdGraph* Graph : AllGraphs)
 	{
-		if (Graph && Graph->IsA<UAnimationGraph>())
+		if (!Graph || !Graph->IsA<UAnimationGraph>())
+		{
+			continue;
+		}
+		if (!FirstAnimationGraph)
+		{
+			FirstAnimationGraph = Graph;
+		}
+		UObject* GraphOuter = Graph->GetOuter();
+		if (GraphOuter != AnimBP && GraphOuter != AnimBP->GeneratedClass)
+		{
+			continue;
+		}
+		if (!FirstTopLevelAnimationGraph)
+		{
+			FirstTopLevelAnimationGraph = Graph;
+		}
+		if (Graph->GetFName() == TEXT("AnimGraph"))
 		{
 			AnimGraph = Graph;
 			break;
 		}
+	}
+	if (!AnimGraph)
+	{
+		AnimGraph = FirstTopLevelAnimationGraph ? FirstTopLevelAnimationGraph : FirstAnimationGraph;
 	}
 
 	if (!AnimGraph)
@@ -190,7 +426,8 @@ FString FAnimBPDumper::DumpAnimBP(const FString& AssetPath)
 
 	// Walk the pose chain from root
 	TSet<UEdGraphNode*> Visited;
-	WalkPoseChain(RootNode, 0, Output, Visited);
+	int32 NodeBudget = 2000;
+	WalkPoseChain(RootNode, 0, Output, Visited, NodeBudget);
 
 	// Dump cached pose definitions not reached from the root walk
 	// (SaveCachedPose nodes on parallel branches consumed via UseCachedPose references)
@@ -255,21 +492,49 @@ FString FAnimBPDumper::DumpAnimBP(const FString& AssetPath)
 // Pose chain walker — recursive backward walk
 // ============================================================================
 
-void FAnimBPDumper::WalkPoseChain(UEdGraphNode* Node, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited)
+void FAnimBPDumper::WalkPoseChain(UEdGraphNode* Node, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited, int32& NodeBudget)
 {
-	if (!Node || Visited.Contains(Node))
+	if (!Node)
 	{
+		return;
+	}
+
+	if (Visited.Contains(Node))
+	{
+		// Shared subtree (e.g. a blend's second input reaching an already-dumped node) —
+		// silence here used to read as "unconnected"
+		Output += Indent(Depth) + TEXT("(-> see above: ") + GetNodeLabel(Node) + TEXT(")\n");
 		return;
 	}
 	Visited.Add(Node);
 
+	// Node budget — insurance against pathological/generated graphs blowing the stack
+	if (NodeBudget <= 0)
+	{
+		return;
+	}
+	if (--NodeBudget == 0)
+	{
+		Output += Indent(Depth) + TEXT("(truncated: node budget reached)\n");
+		return;
+	}
+
 	// Print this node
 	FString Label = GetNodeLabel(Node);
+	if (!Node->IsNodeEnabled())
+	{
+		Label += TEXT(" [DISABLED]");
+	}
 	FString DataPins = FormatDataPins(Node);
 	Output += Indent(Depth) + Label;
 	if (!DataPins.IsEmpty())
 	{
 		Output += TEXT(" (") + DataPins + TEXT(")");
+	}
+	if (UAnimGraphNode_Base* AnimNode = Cast<UAnimGraphNode_Base>(Node))
+	{
+		Output += FormatAnimNodeSettings(AnimNode, Label);
+		Output += FormatNodeFunctionBindings(AnimNode);
 	}
 	Output += TEXT("\n");
 
@@ -279,6 +544,23 @@ void FAnimBPDumper::WalkPoseChain(UEdGraphNode* Node, int32 Depth, FString& Outp
 	{
 		DumpStateMachine(SMNode, Depth + 1, Output, Visited);
 		return; // SM handles its own children
+	}
+
+	// Nodes hosting their own sub-graphs (e.g. Blend Stack per-sample graphs) — recurse
+	// so they stop reading as dead-end leaves. State machines are handled above; linked
+	// layers are dumped in their own sections.
+	if (!Cast<UAnimGraphNode_LinkedAnimLayer>(Node))
+	{
+		for (UEdGraph* SubGraph : Node->GetSubGraphs())
+		{
+			if (!SubGraph)
+			{
+				continue;
+			}
+			Output += Indent(Depth + 1) + TEXT("[SubGraph: ") + SubGraph->GetName() + TEXT("]\n");
+			TSet<UEdGraphNode*> SubVisited;
+			DumpStateContent(SubGraph, Depth + 2, Output, SubVisited);
+		}
 	}
 
 	// Find all input pose link pins and follow them backward
@@ -320,11 +602,11 @@ void FAnimBPDumper::WalkPoseChain(UEdGraphNode* Node, int32 Depth, FString& Outp
 		if (bShowPinLabels && !Input.PinLabel.IsEmpty())
 		{
 			Output += Indent(Depth + 1) + TEXT("[") + Input.PinLabel + TEXT("]\n");
-			WalkPoseChain(Input.LinkedNode, Depth + 1, Output, Visited);
+			WalkPoseChain(Input.LinkedNode, Depth + 1, Output, Visited, NodeBudget);
 		}
 		else
 		{
-			WalkPoseChain(Input.LinkedNode, Depth + 1, Output, Visited);
+			WalkPoseChain(Input.LinkedNode, Depth + 1, Output, Visited, NodeBudget);
 		}
 	}
 }
@@ -459,7 +741,11 @@ void FAnimBPDumper::DumpStateMachine(UAnimGraphNode_StateMachine* SMNode, int32 
 
 			if (RuleExpr.IsEmpty())
 			{
-				RuleExpr = TEXT("(automatic)");
+				// Distinguish a genuinely rule-less transition from a reconstruction
+				// failure — "(automatic)" used to silently swallow parse failures
+				RuleExpr = Trans->bAutomaticRuleBasedOnSequencePlayerInState
+					? TEXT("(automatic)")
+					: TEXT("(unresolved)");
 			}
 
 			// Additional transition info
@@ -498,6 +784,11 @@ void FAnimBPDumper::DumpStateMachine(UAnimGraphNode_StateMachine* SMNode, int32 
 
 			// Priority (lower = evaluated first when multiple transitions from same state are true)
 			TransInfo += FString::Printf(TEXT(" P%d"), Trans->PriorityOrder);
+
+			if (!Trans->IsNodeEnabled())
+			{
+				TransInfo += TEXT(" [DISABLED]");
+			}
 
 			Output += Indent(Depth + 1) + FString::Printf(TEXT("%s -> %s: %s%s\n"),
 				*FromName, *ToName, *RuleExpr, *TransInfo);
@@ -580,7 +871,8 @@ void FAnimBPDumper::DumpStateContent(UEdGraph* StateGraph, int32 Depth, FString&
 
 	if (ResultNode)
 	{
-		WalkPoseChain(ResultNode, Depth, Output, Visited);
+		int32 NodeBudget = 2000;
+		WalkPoseChain(ResultNode, Depth, Output, Visited, NodeBudget);
 	}
 	else
 	{
@@ -624,8 +916,7 @@ FString FAnimBPDumper::BuildTransitionRuleExpression(UEdGraph* TransitionGraph)
 		{
 			if (Pin->LinkedTo.Num() > 0)
 			{
-				TSet<UEdGraphNode*> Visited;
-				return FBlueprintDumpUtils::BuildExpressionFromPin(Pin->LinkedTo[0], Visited);
+				return FBlueprintDumpUtils::BuildExpressionFromPin(Pin->LinkedTo[0]);
 			}
 			if (!Pin->DefaultValue.IsEmpty())
 			{
@@ -745,6 +1036,12 @@ FString FAnimBPDumper::FormatDataPins(UEdGraphNode* Node)
 
 	TArray<FString> PinStrings;
 
+	// Pins bound via the "Bind" dropdown carry their real source in the node's binding
+	// object, not in DefaultValue — dumping the stale default would assert the opposite
+	// of runtime truth. Collect bindings first so bound pins print the binding instead.
+	TMap<FName, FString> PropertyBindings;
+	CollectPropertyBindings(Node, PropertyBindings);
+
 	for (UEdGraphPin* Pin : Node->Pins)
 	{
 		if (Pin->Direction != EGPD_Input)
@@ -776,13 +1073,26 @@ FString FAnimBPDumper::FormatDataPins(UEdGraphNode* Node)
 			PinName = Pin->PinName.ToString();
 		}
 
+		// Bound pin — the binding is the runtime truth, not the pin's default
+		if (const FString* BoundPath = PropertyBindings.Find(Pin->PinName))
+		{
+			PinStrings.Add(FString::Printf(TEXT("%s=[bound: %s]"), *PinName, **BoundPath));
+			PropertyBindings.Remove(Pin->PinName);
+			continue;
+		}
+
 		if (Pin->LinkedTo.Num() > 0)
 		{
-			// Connected to something — show what
-			UEdGraphNode* SourceNode = Pin->LinkedTo[0]->GetOwningNode();
+			// Connected to something — show what (element null-guarded: stale links exist in corrupt assets)
+			UEdGraphPin* LinkedPin = Pin->LinkedTo[0];
+			UEdGraphNode* SourceNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
 			FString SourceName;
 
-			if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(SourceNode))
+			if (!SourceNode)
+			{
+				SourceName = TEXT("???");
+			}
+			else if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(SourceNode))
 			{
 				SourceName = VarGet->GetVarName().ToString();
 			}
@@ -793,8 +1103,7 @@ FString FAnimBPDumper::FormatDataPins(UEdGraphNode* Node)
 			else
 			{
 				// Recursive resolution for pure nodes (operators, struct breaks, selects, etc.)
-				TSet<UEdGraphNode*> ExprVisited;
-				SourceName = FBlueprintDumpUtils::BuildExpressionFromPin(Pin->LinkedTo[0], ExprVisited, /*MaxDepth=*/4);
+				SourceName = FBlueprintDumpUtils::BuildExpressionFromPin(LinkedPin, /*MaxDepth=*/4);
 			}
 
 			PinStrings.Add(FString::Printf(TEXT("%s=%s"), *PinName, *SourceName));
@@ -813,6 +1122,12 @@ FString FAnimBPDumper::FormatDataPins(UEdGraphNode* Node)
 			}
 			PinStrings.Add(FString::Printf(TEXT("%s=%s"), *PinName, *Pin->DefaultValue));
 		}
+	}
+
+	// Bindings whose pin is hidden (or absent) still drive the node at runtime — print them too
+	for (const TPair<FName, FString>& Binding : PropertyBindings)
+	{
+		PinStrings.Add(FString::Printf(TEXT("%s=[bound: %s]"), *Binding.Key.ToString(), *Binding.Value));
 	}
 
 	return FString::Join(PinStrings, TEXT(", "));
@@ -839,7 +1154,8 @@ FString FAnimBPDumper::FindEntryStateName(UEdGraph* StateMachineGraph)
 			{
 				if (Pin->Direction == EGPD_Output && Pin->LinkedTo.Num() > 0)
 				{
-					UEdGraphNode* FirstState = Pin->LinkedTo[0]->GetOwningNode();
+					UEdGraphPin* LinkedPin = Pin->LinkedTo[0];
+					UEdGraphNode* FirstState = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
 					if (UAnimStateNodeBase* StateBase = Cast<UAnimStateNodeBase>(FirstState))
 					{
 						return StateBase->GetStateName();
@@ -909,7 +1225,8 @@ void FAnimBPDumper::DumpAnimationLayers(UAnimBlueprint* AnimBP, FString& Output)
 			if (ResultNode)
 			{
 				TSet<UEdGraphNode*> LayerVisited;
-				WalkPoseChain(ResultNode, 2, Output, LayerVisited);
+				int32 NodeBudget = 2000;
+				WalkPoseChain(ResultNode, 2, Output, LayerVisited, NodeBudget);
 				DumpUnvisitedCachedPoses(LayerGraph, 2, Output, LayerVisited);
 			}
 			else
@@ -950,7 +1267,8 @@ void FAnimBPDumper::DumpUnvisitedCachedPoses(UEdGraph* Graph, int32 BaseDepth, F
 	for (UAnimGraphNode_SaveCachedPose* SaveCache : UnvisitedCaches)
 	{
 		TSet<UEdGraphNode*> CacheVisited;
-		WalkPoseChain(SaveCache, BaseDepth, Output, CacheVisited);
+		int32 NodeBudget = 2000;
+		WalkPoseChain(SaveCache, BaseDepth, Output, CacheVisited, NodeBudget);
 	}
 }
 

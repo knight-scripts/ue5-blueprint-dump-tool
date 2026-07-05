@@ -361,7 +361,7 @@ FString FBlueprintDumpUtils::ResolveOperatorFromTitle(const FString& Title)
 	return ResolveOperatorSymbol(FirstWord);
 }
 
-FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGraphNode*>& Visited, int32 MaxDepth, int32 CurrentDepth)
+FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxDepth, int32 CurrentDepth)
 {
 	if (!Pin)
 	{
@@ -374,7 +374,10 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGr
 		return TEXT("???");
 	}
 
-	// Depth guard — return node title as fallback at max depth
+	// Depth guard — return node title as fallback at max depth.
+	// This is the ONLY recursion bound: valid BP data graphs cannot contain cycles
+	// (the compiler rejects them), and one Get node routinely feeds multiple
+	// consumers — a visited set here produced only false "(cycle)" markers.
 	if (CurrentDepth >= MaxDepth)
 	{
 		FString Title = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
@@ -382,11 +385,12 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGr
 		return Title.IsEmpty() ? Node->GetName() : Title;
 	}
 
-	if (Visited.Contains(Node))
+	// Wrap nested operator results so precedence survives reconstruction:
+	// AND(bA, OR(bB, bC)) must print "bA && (bB || bC)", not "bA && bB || bC".
+	auto Grouped = [CurrentDepth](const FString& Expr) -> FString
 	{
-		return TEXT("(cycle)");
-	}
-	Visited.Add(Node);
+		return CurrentDepth > 0 ? TEXT("(") + Expr + TEXT(")") : Expr;
+	};
 
 	// Reroute nodes (Knots) — follow through transparently
 	if (UK2Node_Knot* Knot = Cast<UK2Node_Knot>(Node))
@@ -395,7 +399,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGr
 		{
 			if (KnotPin->Direction == EGPD_Input && KnotPin->LinkedTo.Num() > 0)
 			{
-				return BuildExpressionFromPin(KnotPin->LinkedTo[0], Visited, MaxDepth, CurrentDepth + 1);
+				return BuildExpressionFromPin(KnotPin->LinkedTo[0], MaxDepth, CurrentDepth + 1);
 			}
 		}
 		return TEXT("???");
@@ -456,8 +460,8 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGr
 				{
 					if (InputPin->LinkedTo.Num() > 0)
 					{
-						return FString::Printf(TEXT("NOT %s"),
-							*BuildExpressionFromPin(InputPin->LinkedTo[0], Visited, MaxDepth, CurrentDepth + 1));
+						return Grouped(FString::Printf(TEXT("NOT %s"),
+							*BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1)));
 					}
 				}
 			}
@@ -478,7 +482,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGr
 				{
 					if (InputPin->LinkedTo.Num() > 0)
 					{
-						Operands.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], Visited, MaxDepth, CurrentDepth + 1));
+						Operands.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1));
 					}
 					else
 					{
@@ -499,11 +503,12 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGr
 
 			if (Operands.Num() >= 2)
 			{
-				return FString::Printf(TEXT("%s %s %s"), *Operands[0], *OpSymbol, *Operands[1]);
+				return Grouped(FString::Printf(TEXT("%s %s %s"), *Operands[0], *OpSymbol, *Operands[1]));
 			}
 			if (Operands.Num() == 1)
 			{
-				return FString::Printf(TEXT("%s %s 0"), *Operands[0], *OpSymbol);
+				// Missing operand is a parse gap — say so instead of inventing a value
+				return Grouped(FString::Printf(TEXT("%s %s ?"), *Operands[0], *OpSymbol));
 			}
 			return OpSymbol;
 		}
@@ -524,7 +529,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGr
 
 			if (InputPin->LinkedTo.Num() > 0)
 			{
-				Operands.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], Visited, MaxDepth, CurrentDepth + 1));
+				Operands.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1));
 			}
 			else
 			{
@@ -543,7 +548,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGr
 		FString OpSymbol = ResolveOperatorFromTitle(NodeTitle);
 		if (!OpSymbol.IsEmpty() && Operands.Num() >= 2)
 		{
-			return FString::Printf(TEXT("%s %s %s"), *Operands[0], *OpSymbol, *Operands[1]);
+			return Grouped(FString::Printf(TEXT("%s %s %s"), *Operands[0], *OpSymbol, *Operands[1]));
 		}
 
 		// Not an operator — format with inputs if available
@@ -632,11 +637,16 @@ FString FBlueprintDumpUtils::GetDataInputSummary(UEdGraphNode* Node)
 
 		if (Pin->LinkedTo.Num() > 0)
 		{
-			// Connected — show source
-			UEdGraphNode* SourceNode = Pin->LinkedTo[0]->GetOwningNode();
+			// Connected — show source (element null-guarded: stale link entries exist in corrupt assets)
+			UEdGraphPin* LinkedPin = Pin->LinkedTo[0];
+			UEdGraphNode* SourceNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
 			FString SourceLabel;
 
-			if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(SourceNode))
+			if (!SourceNode)
+			{
+				SourceLabel = TEXT("???");
+			}
+			else if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(SourceNode))
 			{
 				SourceLabel = VarGet->GetVarName().ToString();
 			}
@@ -647,8 +657,7 @@ FString FBlueprintDumpUtils::GetDataInputSummary(UEdGraphNode* Node)
 			else
 			{
 				// Gap 1: Recursive resolution for pure nodes (operators, struct breaks, selects, etc.)
-				TSet<UEdGraphNode*> ExprVisited;
-				SourceLabel = BuildExpressionFromPin(Pin->LinkedTo[0], ExprVisited, /*MaxDepth=*/4);
+				SourceLabel = BuildExpressionFromPin(LinkedPin, /*MaxDepth=*/4);
 			}
 
 			Parts.Add(FString::Printf(TEXT("%s=%s"), *PinName, *SourceLabel));
@@ -681,10 +690,31 @@ FString FBlueprintDumpUtils::GetDataInputSummary(UEdGraphNode* Node)
 // Core: exec chain walker
 // ============================================================================
 
-void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited)
+void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited, int32& NodeBudget)
 {
 	if (!Node)
 	{
+		return;
+	}
+
+	// Cycle detection — BEFORE knot handling: an exec reroute loop (knot->knot cycle,
+	// wireable in the editor) previously bypassed this check and recursed to stack overflow
+	if (Visited.Contains(Node))
+	{
+		Output += Indent(Depth) + TEXT("(cycle -> ") + GetK2NodeLabel(Node) + TEXT(")\n");
+		return;
+	}
+	Visited.Add(Node);
+
+	// Node budget — insurance against macro-heavy/generated graphs blowing the stack
+	// (linear chains recurse one frame per node). Never triggers on healthy assets.
+	if (NodeBudget <= 0)
+	{
+		return;
+	}
+	if (--NodeBudget == 0)
+	{
+		Output += Indent(Depth) + TEXT("(truncated: node budget reached)\n");
 		return;
 	}
 
@@ -698,20 +728,12 @@ void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString
 			{
 				if (LinkedPin && LinkedPin->GetOwningNode())
 				{
-					WalkExecChain(LinkedPin->GetOwningNode(), Depth, Output, Visited);
+					WalkExecChain(LinkedPin->GetOwningNode(), Depth, Output, Visited, NodeBudget);
 				}
 			}
 		}
 		return;
 	}
-
-	// Cycle detection
-	if (Visited.Contains(Node))
-	{
-		Output += Indent(Depth) + TEXT("(cycle -> ") + GetK2NodeLabel(Node) + TEXT(")\n");
-		return;
-	}
-	Visited.Add(Node);
 
 	// Print this node
 	FString Label = GetK2NodeLabel(Node);
@@ -727,7 +749,8 @@ void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString
 			{
 				if (Pin->LinkedTo.Num() > 0)
 				{
-					UEdGraphNode* SourceNode = Pin->LinkedTo[0]->GetOwningNode();
+					UEdGraphPin* LinkedPin = Pin->LinkedTo[0];
+					UEdGraphNode* SourceNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
 					FString SourceLabel;
 					if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(SourceNode))
 					{
@@ -737,10 +760,14 @@ void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString
 					{
 						SourceLabel = FuncCall->FunctionReference.GetMemberName().ToString() + TEXT("()");
 					}
-					else
+					else if (SourceNode)
 					{
 						SourceLabel = SourceNode->GetNodeTitle(ENodeTitleType::ListView).ToString();
 						SourceLabel.ReplaceInline(TEXT("\n"), TEXT(" "));
+					}
+					else
+					{
+						SourceLabel = TEXT("???");
 					}
 					Label += TEXT(" = ") + SourceLabel;
 				}
@@ -755,6 +782,12 @@ void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString
 	else if (!DataSummary.IsEmpty())
 	{
 		Label += TEXT(" (") + DataSummary + TEXT(")");
+	}
+
+	// Disabled nodes are compiled out at runtime — annotate instead of presenting as live logic
+	if (!Node->IsNodeEnabled())
+	{
+		Label += TEXT(" [DISABLED]");
 	}
 
 	Output += Indent(Depth) + Label + TEXT("\n");
@@ -776,7 +809,7 @@ void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString
 		{
 			if (LinkedPin && LinkedPin->GetOwningNode())
 			{
-				WalkExecChain(LinkedPin->GetOwningNode(), Depth, Output, Visited);
+				WalkExecChain(LinkedPin->GetOwningNode(), Depth, Output, Visited, NodeBudget);
 			}
 		}
 		return;
@@ -805,7 +838,7 @@ void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString
 		{
 			if (LinkedPin && LinkedPin->GetOwningNode())
 			{
-				WalkExecChain(LinkedPin->GetOwningNode(), Depth + 2, Output, BranchVisited);
+				WalkExecChain(LinkedPin->GetOwningNode(), Depth + 2, Output, BranchVisited, NodeBudget);
 			}
 		}
 	}
@@ -949,6 +982,10 @@ void FBlueprintDumpUtils::DumpEventGraphs(UBlueprint* Blueprint, FString& Output
 		{
 			// Print event header with parameter info
 			FString EventLabel = GetK2NodeLabel(EventNode);
+			if (!EventNode->IsNodeEnabled())
+			{
+				EventLabel += TEXT(" [DISABLED]");
+			}
 
 			// Extract parameter pins (non-exec output pins = event parameters)
 			TArray<FString> Params;
@@ -970,6 +1007,7 @@ void FBlueprintDumpUtils::DumpEventGraphs(UBlueprint* Blueprint, FString& Output
 
 			// Walk exec chain from this event
 			TSet<UEdGraphNode*> Visited;
+			int32 NodeBudget = 2000;
 			TArray<UEdGraphPin*> ExecOuts = GetExecOutputPins(EventNode);
 			for (UEdGraphPin* OutPin : ExecOuts)
 			{
@@ -977,7 +1015,7 @@ void FBlueprintDumpUtils::DumpEventGraphs(UBlueprint* Blueprint, FString& Output
 				{
 					if (LinkedPin && LinkedPin->GetOwningNode())
 					{
-						WalkExecChain(LinkedPin->GetOwningNode(), 1, Output, Visited);
+						WalkExecChain(LinkedPin->GetOwningNode(), 1, Output, Visited, NodeBudget);
 					}
 				}
 			}
@@ -1074,6 +1112,7 @@ void FBlueprintDumpUtils::DumpFunctions(UBlueprint* Blueprint, FString& Output)
 
 		// Walk exec chain from entry
 		TSet<UEdGraphNode*> Visited;
+		int32 NodeBudget = 2000;
 		TArray<UEdGraphPin*> ExecOuts = GetExecOutputPins(EntryNode);
 		for (UEdGraphPin* OutPin : ExecOuts)
 		{
@@ -1081,7 +1120,7 @@ void FBlueprintDumpUtils::DumpFunctions(UBlueprint* Blueprint, FString& Output)
 			{
 				if (LinkedPin && LinkedPin->GetOwningNode())
 				{
-					WalkExecChain(LinkedPin->GetOwningNode(), 1, Output, Visited);
+					WalkExecChain(LinkedPin->GetOwningNode(), 1, Output, Visited, NodeBudget);
 				}
 			}
 		}

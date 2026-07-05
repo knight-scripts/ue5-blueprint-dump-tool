@@ -33,8 +33,9 @@ public:
 
 	// --- Core: exec chain walker ---
 
-	/** Walk forward through exec pins from a node, building a text representation. */
-	static void WalkExecChain(UEdGraphNode* Node, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited);
+	/** Walk forward through exec pins from a node, building a text representation.
+	 *  NodeBudget bounds total nodes per walk (insurance against generated/macro-heavy graphs). */
+	static void WalkExecChain(UEdGraphNode* Node, int32 Depth, FString& Output, TSet<UEdGraphNode*>& Visited, int32& NodeBudget);
 
 	/** Get a human-readable label for a K2 (Blueprint logic) node. */
 	static FString GetK2NodeLabel(UEdGraphNode* Node);
@@ -53,8 +54,10 @@ public:
 	/** Extract operator from node title (e.g., "Equal (Enum)" -> "=="). */
 	static FString ResolveOperatorFromTitle(const FString& Title);
 
-	/** Recursively build expression string walking backward from a pin. */
-	static FString BuildExpressionFromPin(UEdGraphPin* Pin, TSet<UEdGraphNode*>& Visited, int32 MaxDepth = 10, int32 CurrentDepth = 0);
+	/** Recursively build expression string walking backward from a pin.
+	 *  No visited set: valid BP data graphs are DAGs (the compiler rejects true cycles),
+	 *  so shared subexpressions are legal and MaxDepth alone bounds the walk. */
+	static FString BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxDepth = 10, int32 CurrentDepth = 0);
 
 	// --- Asset path normalization ---
 
