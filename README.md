@@ -39,36 +39,37 @@ Graphs: AnimGraph
 === AnimGraph (pose chain from Root) ===
 Output Pose (Root)
   \-- Control Rig
-    \-- Orientation Warping (Alpha=OrientationWarpingAngle)
-      \-- Stride Warping
-        \-- Apply Additive (Alpha=LeanAmountLR)
-          \-- Slot: DefaultSlot
-            \-- State Machine: LocomotionSM
+    \-- Blend Poses by bool (bUseUpperBody) (True Blend Time=0.100000, False Blend Time=0.100000)
+      \-- [True Pose]
+      \-- Layered blend per bone
+        \-- [Base]
+        \-- Slot: UpperBodySlot
+      \-- [False Pose]
+      \-- State Machine: MovementSM
 
-  === State Machine: LocomotionSM ===
+  === State Machine: MovementSM ===
   Entry -> Idle
-  States: Idle, TurnInPlace, Start, Locomotion, Stop, Pivot
+  States: Idle, Start, Move, Stop
   Transitions:
-    Idle -> TurnInPlace: CurrentPhase == ELocomotionPhase::TurnInPlace [Inert 0.20s] P1
-    Idle -> Start: CurrentPhase == ELocomotionPhase::Start [Inert 0.10s] P1
-    Start -> Locomotion: CurrentPhase == ELocomotionPhase::Locomotion [Std 0.20s] P1
-    Locomotion -> Stop: CurrentPhase == ELocomotionPhase::Stop [Std 0.15s] P1
-    Locomotion -> Pivot: CurrentPhase == ELocomotionPhase::Pivot [Inert 0.14s] P1
+    Idle -> Start: bHasMovementInput [Inert 0.20s] P1
+    Start -> Move: MovementState == EMovementState::Moving [Std 0.20s] P1
+    Move -> Stop: !bHasMovementInput && Speed < 10.000000 [Std 0.15s] P1
+    Stop -> Idle: StateWeight >= 1.0 [Std 0.10s] P1
 
   --- State: Idle ---
     State Result
-      \-- Sequence Player (Sequence=AS_Idle)
+      \-- Sequence Player (Sequence=Idle_Anim)
 
-  --- State: Locomotion ---
+  --- State: Move ---
     State Result
-      \-- State Machine: RunDirectionalSM
+      \-- State Machine: DirectionalMoveSM
 
-        === State Machine: RunDirectionalSM ===
-        Entry -> Front
-        States: Front, Right, Back, Left
+        === State Machine: DirectionalMoveSM ===
+        Entry -> Forward
+        States: Forward, Right, Backward, Left
         Transitions:
-          Front -> Right: CardinalDirection == Right [Inert 0.20s] P1
-          Right -> Front: CardinalDirection == Front [Inert 0.20s] P1
+          Forward -> Right: MovementDirection == EDirection::Right [Inert 0.20s] P1
+          Right -> Forward: MovementDirection == EDirection::Forward [Inert 0.20s] P1
           ...
 ```
 
@@ -125,7 +126,7 @@ Parent Class: ACharacter
 | **Multi-input nodes** | Pin labels shown for blend nodes (`[Base Pose]`, `[Blend Pose 0]`) |
 | **Conduits** | Listed separately with their rule expressions |
 | **State aliases** | UE5 state alias nodes detected and listed |
-| **Nested SMs** | Full recursive dump (LocomotionSM -> RunDirectionalSM -> state content) |
+| **Nested SMs** | Full recursive dump (outer SM -> nested SM -> state content) |
 | **Animation layers** | Interface layers, self-linked layers, monolithic AnimBP support |
 | **Variables** | All Blueprint variables with types, defaults, and property flags |
 | **EventGraph** | Event handlers with exec chain walking |
