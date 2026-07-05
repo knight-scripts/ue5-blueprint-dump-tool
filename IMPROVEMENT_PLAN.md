@@ -235,7 +235,7 @@ Property Access nodes read struct member chains but we only show "Property Acces
 
 **Root cause:** `GetNodeTitle(FullTitle)` doesn't include the property path on a second line for AnimBP Property Access nodes. The actual path is stored internally in the node's `PropertyAccess` member.
 
-**Fix:** Add `PropertyAccessNode` module dependency to `Build.cs`. Cast to `UK2Node_PropertyAccess` (or the AnimGraph equivalent) and read the `Path` / `ResolvedPinPath` property directly. Fallback to current "Value" behavior if cast fails.
+**Fix (verified 5.7):** read `UK2Node_PropertyAccess::GetTextPath()` / `GetPath()` for the path. Its header sits in a plugin Private/ folder, so read the `TextPath` / `Path` UPROPERTYs via reflection — no fragile private include or module dependency needed. Fallback to current "Value" behavior if the cast/reflection fails.
 
 #### Gap 1.6: Branch Condition Sources (MEDIUM)
 ```
@@ -273,20 +273,51 @@ These patterns work because they're node-level properties, not pin-level data fl
 These are the same failure category as Gap 1.2 above ("dump shows a default, runtime does
 something else") and were surfaced by the full source review; they extend M1's gap list.
 
+> **✅ Verified 5.7 API (decoded from engine source, 2026-07-05).** The symbols below are
+> confirmed against `AnimGraphNode_Base.{h,cpp}`, the editor `AnimGraphNode_BlendStack.h`,
+> `K2Node_PropertyAccess.h`, and `AnimGraphNodeBinding{,_Base}.h` at UE `ref=5.7`. Where a gap
+> writeup below still names a different symbol, **this block wins** — two earlier guesses were
+> wrong (1.1b, 1.2b). All against 5.7 specifically (APIs drift across versions).
+>
+> - **Read any node's settings (1.5b-A):** `UAnimGraphNode_Base::GetFNodeProperty()` (public
+>   `UE_API`) returns the `FStructProperty` of the inner `FAnimNode_*`; `GetFNode()` returns
+>   `Property->ContainerPtrToValuePtr<FAnimNode_Base>(this)`. Iterate the struct's fields by
+>   reflection, print non-transient values → works for **every** anim node. The Blend Stack
+>   editor node stores its runtime node as `UPROPERTY FAnimNode_BlendStack Node`.
+> - **Function bindings (1.1b):** `UAnimGraphNode_Base::GetBoundFunctionsInfo(TArray<TPair<FName,FName>>&)`,
+>   or read the three `UPROPERTY FMemberReference` members `InitialUpdateFunction` /
+>   `BecomeRelevantFunction` / `UpdateFunction`. (NOT `FAnimNodeFunctionRef` — wrong guess.)
+> - **Pin property bindings (1.2b):** ⚠ the inline node map is **`PropertyBindings_DEPRECATED` in
+>   5.7.** Real path: `GetBinding()` → `UAnimGraphNodeBinding` (default impl
+>   `UAnimGraphNodeBinding_Base`, storing `TMap<FName, FAnimGraphNodePropertyBinding> PropertyBindings`);
+>   each `FAnimGraphNodePropertyBinding` carries `TArray<FString> PropertyPath` (the display target)
+>   + a `Type`. Map pin → binding name via `GetPinBindingInfo(...)` / `IsPinBindable()`. The impl
+>   header is **Private**, so read `PropertyBindings` via reflection, not by including it.
+> - **Property Access deep path (1.5):** `UK2Node_PropertyAccess::GetTextPath()` (display `FText`)
+>   or `GetPath()` (`TArray<FString>`). Header lives in a plugin **Private/** folder → read the
+>   `TextPath` / `Path` UPROPERTYs by reflection (no fragile private include, no module dep).
+> - **Blend Stack sub-graph (1.5b-C):** `UAnimGraphNode_BlendStack_Base::GetSubGraphs()` exposes
+>   the per-sample `BoundGraph`. Have `WalkPoseChain` recurse `GetSubGraphs()` (generalizes to any
+>   node hosting sub-graphs) instead of stopping at a mute leaf.
+>
+> Portability: `GetFNodeProperty`/`GetFNode`/`GetBoundFunctionsInfo`/`GetPinBindingInfo` are public
+> `UE_API` on `UAnimGraphNode_Base` (call directly); the binding-impl and Property-Access classes
+> are Private/Internal-module → prefer reflection over including their headers.
+
 #### 1.1b Anim node FUNCTION bindings not dumped
 `On Initial Update` / `On Become Relevant` / `On Update` member-function bindings on anim
 graph nodes are invisible to the dump — e.g. a Control Rig node whose reset flag is driven
 via its On Become Relevant function is a load-bearing piece of setup the dump is blind to.
 GASP uses these bindings heavily.
 
-**Where:** the bindings live on `UAnimGraphNode_Base` / the node's `FAnimNodeFunctionRef`
-properties (InitialUpdate/BecomeRelevant/Update function refs). Print as e.g.
-`[OnBecomeRelevant: <FunctionName>]` after the node label in `WalkPoseChain`.
+**Where (verified 5.7):** `UAnimGraphNode_Base::GetBoundFunctionsInfo(...)`, or the
+`FMemberReference` members `InitialUpdateFunction` / `BecomeRelevantFunction` / `UpdateFunction`.
+Print as e.g. `[OnBecomeRelevant: <FunctionName>]` after the node label in `WalkPoseChain`.
 
 #### 1.2b Pin PROPERTY bindings not dumped (silently wrong data)
-UE5 anim node pins can be bound via the "Bind" dropdown
-(`UAnimGraphNode_Base::PropertyBindings`, `TMap<FName, FAnimGraphNodePropertyBinding>`)
-instead of wires. `FormatDataPins` (`AnimBPDumper.cpp:739`) reads only `LinkedTo` and
+UE5 anim node pins can be bound via the "Bind" dropdown (in 5.7 stored on the node's
+`GetBinding()` object, NOT the deprecated inline `PropertyBindings` map — see Verified 5.7 API
+above) instead of wires. `FormatDataPins` (`AnimBPDumper.cpp:739`) reads only `LinkedTo` and
 `DefaultValue` — a bound pin dumps its DEFAULT while runtime uses the binding. Worst
 failure mode for a ground-truth tool.
 
@@ -337,8 +368,8 @@ visible pin exists unless hand-exposed → all skipped. Lost entirely:
   total because it is *all* hidden pins. SequencePlayer's asset+play-rate survive only
   because they ride the node TITLE (`GetNodeLabel` → `GetNodeTitle`), not because the tool
   reads the struct.
-  **Fix (new capability, lifts every node):** for `UAnimGraphNode_Base`, find the inner
-  `FAnimNode_*` via its `FStructProperty` (child of `FAnimNode_Base`), iterate that struct's
+  **Fix (new capability, lifts every node):** for `UAnimGraphNode_Base`, get the inner
+  `FAnimNode_*` via `GetFNodeProperty()` / `GetFNode()`, iterate that struct's
   editable properties and print non-transient values (skip `Transient`, skip pose-link
   arrays like `PerSampleGraphPoseLinks`). Objects by name, enums via `ResolveEnumPinValue`.
   Gate verbosity behind a flag / per-node allowlist so common nodes stay terse. Larger than
@@ -350,7 +381,7 @@ frame), the dump shows their static defaults instead of the binding. A node whos
 Time / Loop / play-rate are runtime-driven prints `Animation Time=0.000000, Loop=False` —
 asserting it plays from t=0 non-looping, the *opposite* of runtime truth — and pins whose
 `DefaultValue == AutogeneratedDefaultValue` filter out entirely (`:802`), so most bound pins
-don't appear at all. Exactly 1.2b (`UAnimGraphNode_Base::PropertyBindings`).
+don't appear at all. Exactly 1.2b (read via `GetBinding()`, not the deprecated `PropertyBindings` map).
 **Fix per 1.2b:** print `PinName=[bound: PropertyPath]`.
 
 **(C) Reads as a dead-end; its dynamic, C++-fed nature is unstated.**
@@ -364,8 +395,8 @@ mute dead-end and cannot tell it is the delivery mux for every requested clip.
 label, e.g. `Blend Stack [OnUpdate: <FunctionName>]`.
 
 **Verification-first:** before coding, add a throwaway dump that, for the Blend Stack node,
-walks the inner struct + the `PropertyBindings` map, to confirm (A)/(B) exactly and catch
-any already-exposed pins the tool may be mis-reading.
+walks the inner struct (`GetFNodeProperty()`) + the `GetBinding()` object, to confirm (A)/(B)
+exactly and catch any already-exposed pins the tool may be mis-reading.
 
 **Priority.** (B) rides 1.2b and (C) rides 1.1b — do them with those. **(A) is the new item
 and the highest fidelity payoff:** it is the only path by which node settings
