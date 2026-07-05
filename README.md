@@ -159,7 +159,7 @@ Transition rules and exec chains resolve expressions recursively:
 - **Animation asset internals** — curves, notifies inside montages/sequences
 - **Blend profiles, curve assets** — referenced by name only
 
-See [IMPROVEMENT_MILESTONES.md](IMPROVEMENT_MILESTONES.md) for the full roadmap.
+See [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) for the full roadmap.
 
 ## Validated On
 
@@ -199,7 +199,7 @@ Console Command
 BlueprintDumpTool/
 +-- BlueprintDumpTool.uplugin
 +-- README.md
-+-- IMPROVEMENT_MILESTONES.md
++-- IMPROVEMENT_PLAN.md
 +-- Source/BlueprintDumpTool/
     +-- BlueprintDumpTool.Build.cs
     +-- Public/
