@@ -708,71 +708,6 @@ Answers questions like: "What would break if I delete A_Als_Sprint?" and "Where 
 
 ---
 
-## Milestone 9: Mermaid State Machine Diagrams (LOW PRIORITY, needs M3)
-
-### Problem
-State machine text dumps are hard to visualize for complex SMs with many transitions.
-
-### Proposed Feature
-Generate Mermaid-compatible diagrams from JSON output:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Move: HasMovementInput
-    Idle --> RotateLeft: Turn Left
-    Idle --> RotateRight: Turn Right
-    Move --> Stop: !HasVelocity && StateWeight >= 1.0
-    Move --> Idle: !HasVelocity
-    Stop --> Idle: StateWeight >= 1.0
-```
-
-### Impact
-Visual state machine exploration. Useful for documentation and onboarding.
-
----
-
-## Milestone 10: Semantic Compression for LLM Context (FUTURE)
-
-### Problem
-The 8 ALS overlay AnimBPs (Default, Feminine, Masculine, Injured, HandsTied, Barrel, Box, Torch) all follow the same pattern. 400+ lines of near-identical structure.
-
-### Proposed Feature
-Detect repeated patterns and output template + variations:
-
-```
-=== Overlay Template (used by: Default, Feminine, Masculine, Barrel, Box) ===
-Blend Poses by Gameplay Tag
-  [Default] → Apply Additive (Alpha=VAR) + Blend Multi pose selection
-  [Mantling] → ...
-  [Rolling] → ...
-
-Variations:
-  Default:   Alpha=0.750, Poses='A_Als_Default_Poses'
-  Feminine:  Alpha=0.500, Poses='A_Als_Feminine_Poses'
-  Masculine: Alpha=1.000, Poses='A_Als_Masculine_Poses'
-```
-
-### Impact
-Massive context window savings when feeding dumps to LLMs. 8 files compressed to ~20% of original size.
-
----
-
-## Milestone 11: Validation / Analysis Mode (FUTURE)
-
-### Proposed Checks
-- **Unreachable states** — states with no incoming transitions (except entry)
-- **Missing return transitions** — A→B exists but B→A doesn't (possible trap state)
-- **Duplicate transition rules** — same source→target with same condition
-- **Animation coverage** — states without animation players (empty states)
-- **Transition completeness** — states with only one exit path
-- **Curve usage audit** — Modify Curve nodes referencing curves that don't exist on skeleton
-
-### Impact
-Catches common AnimBP authoring mistakes. Useful for QA and review.
-
----
-
 ## Milestone 12: UE5 Version Compatibility (MEDIUM PRIORITY)
 
 ### Current State
@@ -1008,16 +943,13 @@ As we add new dumpers (M4-M6), more referenced assets move to the "SUPPORTED" se
 | **1** | **M1: Data pin wiring** | **Medium-High** | **HIGHEST — makes dumps recreatable** | **5/6 GASP functions currently fail without this** |
 | 2 | M2: Batch dump + scan manifest | Low-Medium | High — enables everything else | Self-documenting roadmap |
 | 3 | M13: Right-click menu + ref chain | Low-Medium | High — zero-friction UX | Phase 1 easy, Phase 2 medium |
-| 4 | M3: JSON output | Medium | High — foundation for tooling | Enables M8, M9 |
+| 4 | M3: JSON output | Medium | High — foundation for tooling | Enables M8 |
 | 5 | M4: Animation metadata | Low-Medium | Medium-High — essential context | Duration/curves/root motion |
 | 6 | M6: Chooser Tables | Medium | High for UE5.4+ projects | GASP uses heavily |
 | 7 | M12: UE5 version compat | Low-Medium | High — broadens audience | Already works on 5.5.1, needs guards |
 | 8 | M5: Blend Space details | Low | Medium — important for locomotion | Axis config critical |
 | 9 | M7: Reroute collapse | Very Low | Low — cosmetic cleanup | AB_Als_Layering noise |
 | 10 | M8: Cross-reference | Low (if M2+M3 done) | Medium | Needs M2+M3 first |
-| 11 | M9: Mermaid diagrams | Low (if M3 done) | Medium — great for docs | Needs M3 first |
-| 12 | M10: Semantic compression | Medium | Medium — LLM context savings | 8 ALS overlays → template |
-| 13 | M11: Validation | Medium | Medium — QA tool | Catches authoring mistakes |
 
 **M1 is #1 because:** Every other milestone adds more assets or better formatting to the dump. Only M1 fixes the fundamental data quality — making function dumps go from "structural skeleton" to "functional specification." Without M1, a batch dump (M2) of JSON (M3) still produces non-recreatable function descriptions.
 
