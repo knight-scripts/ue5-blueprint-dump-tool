@@ -98,6 +98,7 @@ FString FBlueprintDumper::DumpBlueprint(const FString& AssetPath)
 
 	// Sections
 	FBlueprintDumpUtils::DumpComponentTree(Blueprint, Output);
+	FBlueprintDumpUtils::DumpClassDefaultOverrides(Blueprint, Output);
 	FBlueprintDumpUtils::DumpVariables(Blueprint, Output);
 	FBlueprintDumpUtils::DumpInterfaces(Blueprint, Output);
 	FBlueprintDumpUtils::DumpEventGraphs(Blueprint, Output);

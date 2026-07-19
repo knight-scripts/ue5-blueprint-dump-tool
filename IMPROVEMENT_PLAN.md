@@ -511,10 +511,44 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 - [ ] ABP with an On Become Relevant binding → binding visible in dump
 - [ ] Blend Stack node → settings (`MaxActiveBlends`, `bUseInertialBlend`, blend profile) + any bound pins visible
 - [ ] Re-dump a representative ABP, diff reviewed vs a known-good baseline
+- [ ] Class Defaults section: `DumpBP` on a character BP lists a knob deliberately changed
+  in Class Defaults (incl. one on the movement component) with both values; an untouched
+  knob is absent; the section header + `(not listed = inherited default)` footer always print
 
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-19 — Class Defaults overrides section (⚠ pending machine-2 compile + re-dump verification)
+**Gap (filed same day, host-project driven):** dumps showed components and graphs but no
+CDO property state — a BP override of an inherited C++ knob (e.g. a movement-component
+threshold changed in Class Defaults) was invisible, forcing behavioral inference from
+gameplay logs ("override trap" conversations). New section closes it:
+
+- `DumpClassDefaultOverrides` (`BlueprintDumpUtils`) — `=== Class Defaults (overrides vs
+  <Parent>) ===`, three passes, all read-only reflection:
+  1. **CDO vs parent CDO** over the PARENT class property scope (inherited properties
+     only — BP-added variables stay in the Variables section; offsets valid in both
+     containers by construction)
+  2. **Default subobjects** (C++-created components) vs `GetArchetype()` — where
+     Class-Defaults edits to inherited components actually live; bracketed sub-heading
+     per component, emitted only when diffs exist
+  3. **SCS component templates** (BP-added components) vs their archetypes, marked
+     `BP-added`
+- Comparison: `Identical_InContainer` per static-array element (5.7-verified: per-index
+  API, default index 0 — NOT whole-array). Object references compare by pointer, except
+  subobjects of the compared pair (never pointer-equal) → name + class match.
+- Noise filter: skip `Transient | DuplicateTransient | NonPIEDuplicateTransient |
+  Deprecated | InstancedReference | PersistentInstance | ContainsInstancedReference`
+  (instanced POINTERS always differ CDO-vs-parent-CDO; their CONTENT is pass 2).
+- Values via `ExportText_InContainer` (delta=nullptr → full export), object refs as
+  path names, 220-char truncation. Both sides printed: `Knob = X  (default: Y)`.
+- **Absence is meaningful by design**: header + `(not listed = inherited default)`
+  footer ALWAYS print, so "knob not in dump" = "knob at C++ default" in one glance.
+- Wired into BOTH dumpers: `DumpBP` (after component tree) and `DumpAnimBP` (after
+  variables) — ABP Class-Defaults overrides were the original override-trap class.
+- Class-overridden subobjects (archetype class ≠ instance class) are skipped, not
+  field-diffed. Known non-goal: nested subobjects below one level.
 
 ### 2026-07-06 — Phase 0 complete + Blend Stack fidelity cluster
 All of Phase 0, in one commit (signature changes thread through all walkers):

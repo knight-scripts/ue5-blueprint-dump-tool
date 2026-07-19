@@ -5,6 +5,10 @@
 #include "Engine/Blueprint.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
+#include "Components/ActorComponent.h"
+
+#include "UObject/UnrealType.h"
+#include "UObject/PropertyPortFlags.h"
 
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -1304,6 +1308,194 @@ void FBlueprintDumpUtils::DumpComponentTree(UBlueprint* Blueprint, FString& Outp
 	}
 
 	Output += TEXT("\n");
+}
+
+// ============================================================================
+// DumpClassDefaultOverrides
+// ============================================================================
+//
+// "BP property overrides vs C++ defaults": diff the Blueprint CDO — and its
+// default subobjects (e.g. a CharacterMovement component, where movement knobs
+// actually live) — against the parent class archetype, so Class Defaults panel
+// state is visible in the dump. A property NOT listed is running its inherited
+// (usually C++) default; the section header always prints so absence of a knob
+// line is meaningful evidence, not a tool-version ambiguity.
+
+namespace
+{
+	// Diffs of these are noise: transient state, deprecated members, and
+	// instanced-object references (subobject POINTERS always differ between a
+	// BP CDO and its parent CDO; subobject CONTENT is diffed separately).
+	constexpr uint64 SkipDiffPropertyFlags =
+		CPF_Transient | CPF_DuplicateTransient | CPF_NonPIEDuplicateTransient |
+		CPF_Deprecated | CPF_InstancedReference | CPF_PersistentInstance |
+		CPF_ContainsInstancedReference;
+
+	FString ExportPropertyValue(const FProperty* Prop, int32 ArrayIndex, UObject* Container)
+	{
+		// HARD object references: print the asset path, not ExportText's verbose
+		// form. Soft/weak refs stay on the generic path — they resolve to null
+		// when unloaded, which would alias two different soft paths.
+		if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+		{
+			UObject* Value = ObjProp->GetObjectPropertyValue_InContainer(Container, ArrayIndex);
+			return Value ? Value->GetPathName() : TEXT("None");
+		}
+
+		FString ValueStr;
+		Prop->ExportText_InContainer(ArrayIndex, ValueStr, Container, nullptr, Container, PPF_None);
+		if (ValueStr.IsEmpty())
+		{
+			ValueStr = TEXT("(empty)");
+		}
+		else if (ValueStr.Len() > 220)
+		{
+			ValueStr = ValueStr.Left(220) + TEXT("... (truncated)");
+		}
+		return ValueStr;
+	}
+
+	bool PropertyElementIdentical(const FProperty* Prop, int32 ArrayIndex, UObject* Object, UObject* Archetype)
+	{
+		// HARD object references: pointer equality, EXCEPT subobjects of the
+		// compared pair — those can never be pointer-equal, so match by
+		// name + class. Soft/weak refs use the generic path (path comparison).
+		if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+		{
+			UObject* A = ObjProp->GetObjectPropertyValue_InContainer(Object, ArrayIndex);
+			UObject* B = ObjProp->GetObjectPropertyValue_InContainer(Archetype, ArrayIndex);
+			if (A == B)
+			{
+				return true;
+			}
+			if (A && B && (A->IsIn(Object) || B->IsIn(Archetype)))
+			{
+				return A->GetFName() == B->GetFName() && A->GetClass() == B->GetClass();
+			}
+			return false;
+		}
+		return Prop->Identical_InContainer(Object, Archetype, ArrayIndex, PPF_None);
+	}
+
+	// Diff Object vs Archetype over PropertyScope's properties (incl. supers).
+	// PropertyScope must be a class both objects derive from (or their shared
+	// class) so property offsets are valid in both containers.
+	int32 AppendPropertyDiffs(UStruct* PropertyScope, UObject* Object, UObject* Archetype, const TCHAR* LinePrefix, FString& Output)
+	{
+		int32 DiffCount = 0;
+		for (TFieldIterator<FProperty> It(PropertyScope); It; ++It)
+		{
+			const FProperty* Prop = *It;
+			if (Prop->HasAnyPropertyFlags(SkipDiffPropertyFlags))
+			{
+				continue;
+			}
+
+			for (int32 ArrayIndex = 0; ArrayIndex < Prop->ArrayDim; ++ArrayIndex)
+			{
+				if (PropertyElementIdentical(Prop, ArrayIndex, Object, Archetype))
+				{
+					continue;
+				}
+
+				FString Name = Prop->GetName();
+				if (Prop->ArrayDim > 1)
+				{
+					Name += FString::Printf(TEXT("[%d]"), ArrayIndex);
+				}
+
+				Output += FString::Printf(TEXT("%s%s = %s  (default: %s)\n"),
+					LinePrefix, *Name,
+					*ExportPropertyValue(Prop, ArrayIndex, Object),
+					*ExportPropertyValue(Prop, ArrayIndex, Archetype));
+				++DiffCount;
+			}
+		}
+		return DiffCount;
+	}
+
+	// Diff one subobject/template against its archetype; emit a bracketed
+	// sub-heading only when something actually differs.
+	int32 AppendSubobjectDiffs(UObject* Sub, const FString& DisplayName, const TCHAR* Suffix, FString& Output)
+	{
+		if (!Sub)
+		{
+			return 0;
+		}
+		UObject* Archetype = Sub->GetArchetype();
+		if (!Archetype || Archetype == Sub || Archetype->GetClass() != Sub->GetClass())
+		{
+			// No archetype or class-overridden subobject — field diff undefined.
+			return 0;
+		}
+
+		FString Section;
+		const int32 DiffCount = AppendPropertyDiffs(Sub->GetClass(), Sub, Archetype, TEXT("    "), Section);
+		if (DiffCount > 0)
+		{
+			Output += FString::Printf(TEXT("  [%s (%s)%s]\n"), *DisplayName, *Sub->GetClass()->GetName(), Suffix);
+			Output += Section;
+		}
+		return DiffCount;
+	}
+}
+
+void FBlueprintDumpUtils::DumpClassDefaultOverrides(UBlueprint* Blueprint, FString& Output)
+{
+	if (!Blueprint || !Blueprint->GeneratedClass)
+	{
+		return;
+	}
+
+	UClass* GenClass = Blueprint->GeneratedClass;
+	UObject* CDO = GenClass->GetDefaultObject();
+	UClass* ParentClass = GenClass->GetSuperClass();
+	if (!CDO || !ParentClass)
+	{
+		return;
+	}
+	UObject* ParentCDO = ParentClass->GetDefaultObject();
+	if (!ParentCDO)
+	{
+		return;
+	}
+
+	Output += FString::Printf(TEXT("=== Class Defaults (overrides vs %s) ===\n"), *ParentClass->GetName());
+
+	// 1) The CDO itself, over INHERITED properties only (parent-class scope:
+	//    BP-added variables are already covered by the Variables section).
+	int32 TotalDiffs = AppendPropertyDiffs(ParentClass, CDO, ParentCDO, TEXT("  "), Output);
+
+	// 2) Default subobjects (C++-created components) vs their archetypes on the
+	//    parent CDO — where Class-Defaults edits to inherited components live.
+	TArray<UObject*> Subobjects;
+	CDO->GetDefaultSubobjects(Subobjects);
+	for (UObject* Sub : Subobjects)
+	{
+		if (Sub)
+		{
+			TotalDiffs += AppendSubobjectDiffs(Sub, Sub->GetName(), TEXT(""), Output);
+		}
+	}
+
+	// 3) BP-added components: SCS templates vs their archetypes (the component
+	//    class CDO, or the parent BP's template).
+	if (Blueprint->SimpleConstructionScript)
+	{
+		for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+		{
+			if (Node && Node->ComponentTemplate)
+			{
+				TotalDiffs += AppendSubobjectDiffs(Node->ComponentTemplate, Node->GetVariableName().ToString(), TEXT(", BP-added"), Output);
+			}
+		}
+	}
+
+	if (TotalDiffs == 0)
+	{
+		Output += TEXT("  (no overrides)\n");
+	}
+	Output += TEXT("  (not listed = inherited default)\n\n");
 }
 
 // ============================================================================

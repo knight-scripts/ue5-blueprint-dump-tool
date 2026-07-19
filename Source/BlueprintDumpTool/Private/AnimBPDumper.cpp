@@ -358,8 +358,9 @@ FString FAnimBPDumper::DumpAnimBP(const FString& AssetPath)
 	Output.RemoveFromEnd(TEXT(","));
 	Output += TEXT("\n\n");
 
-	// Variables & Interfaces (before AnimGraph)
+	// Variables, Class Defaults overrides & Interfaces (before AnimGraph)
 	FBlueprintDumpUtils::DumpVariables(AnimBP, Output);
+	FBlueprintDumpUtils::DumpClassDefaultOverrides(AnimBP, Output);
 	FBlueprintDumpUtils::DumpInterfaces(AnimBP, Output);
 
 	// Find the AnimGraph (main animation graph).

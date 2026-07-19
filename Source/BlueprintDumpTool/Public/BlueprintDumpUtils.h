@@ -81,6 +81,11 @@ public:
 	/** Dump component tree from the Blueprint's CDO. */
 	static void DumpComponentTree(UBlueprint* Blueprint, FString& Output);
 
+	/** Dump CDO property overrides vs the parent class defaults — the Class
+	 *  Defaults panel state (incl. inherited components' knobs and BP-added
+	 *  component templates). A property not listed is at its inherited default. */
+	static void DumpClassDefaultOverrides(UBlueprint* Blueprint, FString& Output);
+
 	// --- Formatting ---
 
 	/** Indentation helper for exec chain output. */

@@ -89,6 +89,15 @@ Parent Class: ACharacter
   SpringArm (USpringArmComponent)
     +-- Camera (UCameraComponent)
 
+=== Class Defaults (overrides vs Character) ===
+  bUseControllerRotationYaw = False  (default: True)
+  [CharacterMovement (UCharacterMovementComponent)]
+    MaxWalkSpeed = 500.000000  (default: 600.000000)
+    RotationRate = (Pitch=0.000000,Yaw=720.000000,Roll=0.000000)  (default: (Pitch=0.000000,Yaw=360.000000,Roll=0.000000))
+  [SpringArm (USpringArmComponent), BP-added]
+    TargetArmLength = 350.000000  (default: 300.000000)
+  (not listed = inherited default)
+
 === Variables ===
   MaxHealth: float (Default: 100.0) [EditAnywhere]
   bIsDead: bool
@@ -129,6 +138,7 @@ Parent Class: ACharacter
 | **Nested SMs** | Full recursive dump (outer SM -> nested SM -> state content) |
 | **Animation layers** | Interface layers, self-linked layers, monolithic AnimBP support |
 | **Variables** | All Blueprint variables with types, defaults, and property flags |
+| **Class Defaults** | CDO property overrides vs the parent class (not listed = inherited default) |
 | **EventGraph** | Event handlers with exec chain walking |
 | **Functions** | Blueprint functions with signatures, parameters, and exec chains |
 
@@ -137,6 +147,7 @@ Parent Class: ACharacter
 | Feature | Detail |
 |---------|--------|
 | **Component tree** | Both Blueprint and C++ components with hierarchy |
+| **Class Defaults** | CDO + component property overrides vs the parent class / C++ defaults |
 | **Variables** | All Blueprint variables with types, defaults, and flags |
 | **Interfaces** | Implemented interfaces listed |
 | **EventGraph** | Event handlers with exec chain walking |
