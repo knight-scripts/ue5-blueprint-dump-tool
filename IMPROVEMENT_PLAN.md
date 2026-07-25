@@ -582,16 +582,83 @@ expression-collapsing dump of 319 assets produces 319 files of node names.
 
 ### M2 acceptance (known-answer, per the project's decoder-test doctrine)
 
-> Code landed 2026-07-26; **every box below is still unchecked and machine-2-owned.**
-> Nothing here has been compiled or run — machine 1 has no engine.
+> **✅ VERIFIED 2026-07-26 on machine 2** (`SummoningDumps.7z` + `GASPAnimBPDumps.7z`).
+> Compiled clean; both new module deps fine. Results below.
 
-- [ ] T1: dump one TCF AttackProperty BP → its instanced traits/impacts and their tuned values appear, nested and indented
-- [ ] T1: an instanced property whose value is a *subclass* of the declared type still dumps (no "field diff undefined" skip)
-- [ ] T2: `DumpBP` on a DataAsset / BT / Struct / Curve → real content, and an unsupported type prints a loud reason
-- [ ] T3: folder dump of `TempestCombatFramework/Content` → manifest row count == asset count; skipped rows carry reasons
-- [ ] T4: dump a montage carrying `ANS_AttackTrace` → notify class, start, duration, and the instanced attack property all present
-- [ ] T5: `CanSprint` re-dump renders both operands of the AND (the M1 known-answer above)
-- [ ] Re-dump our own `BP_BaseCharacter` + `ABP_Hero` and diff vs the 2026-07-19 baselines — no regressions from T1's recursion
+- [x] T1: instanced traits and their tuned values appear, nested and indented — **PASSED on
+  `IMC_Default`** (struct → array-of-struct → array-of-instanced-object, 3 levels):
+  `Mappings[4] → Modifiers[0] = InputModifierNegate → bX = False (default: True)`.
+  TCF's `FInstancedAttackProperties` / `ImpactProperties[]` is the same shape.
+- [x] T1: an instanced property whose value is a *subclass* still dumps — **PASSED**; the
+  declared type is `UInputModifier`, the values are `InputModifierSwizzleAxis` /
+  `InputModifierNegate` subclasses, and they dump with their class named.
+- [x] T2: real content per type, unsupported types loud — **PASSED across ~20 classes**
+  (Blueprint, AnimBlueprint, InputAction, InputMappingContext, Texture2D, Material,
+  MaterialInstanceConstant, SkeletalMesh, Skeleton, PhysicsAsset, IKRigDefinition,
+  MirrorDataTable, ControlRigBlueprint, SkeletalMeshLODSettings, StaticMesh…). Class named
+  in every header. ⚠ BT/Blackboard/Curve/DataTable/UserStruct paths NOT yet exercised —
+  no such assets in `/Game/Summoning`; they come with the TCF pass.
+- [x] T3: manifest row count == asset count — **PASSED**: 208 found = 35 dumped + 173
+  skipped, every skip carrying `(class filter)`. Mirrored tree correct.
+- [ ] T4: dump a montage carrying `ANS_AttackTrace` → notify class, start, duration, and the instanced attack property all present *(not built)*
+- [x] T5: `CanSprint` renders both operands of the AND — **PASSED**:
+  `Break S Player Input State(CharacterInputState) && Select((Abs(NormalizedDeltaRotator(
+  K2_GetActorRotation(), Conv_VectorToRotator(Select))) < 50.000000), true,
+  bOrientRotationToMovement)`
+- [x] Re-dump `BP_BaseCharacter` + `ABP_Hero`, diff vs 2026-07-19 — **no tool regressions.**
+  All structural deltas are real machine-2 project changes (ABP: the FootPlacement swap;
+  BP: inventory/equipment/interaction components, `RefaceSolverRow.ScaleMax` 1.5→1.3,
+  `RunTurnGen.FrontTravelBand` new). The only tool-attributable delta is an improvement —
+  see "the `(empty)` fix" below.
+
+#### ⭐ Unplanned win: the `(empty)` fix resolved a standing project question
+
+Switching the exporter to `ExportTextItem_Direct` on value pointers made false/zero/None
+values print as themselves instead of the tool's `(empty)` placeholder:
+
+```
+- StartRotationOWThreshold = (empty)     (default: 0.700000)
++ StartRotationOWThreshold = 0.000000    (default: 0.700000)
+- bUseSeparateBrakingFriction = True     (default: (empty))
++ bUseSeparateBrakingFriction = True     (default: False)
+```
+
+The host project's `CLAUDE.md` carried `⚠ StartRotationOWThreshold "(empty)" vs default 0.7
+— verify intent` as an open item. It is answered: the BP deliberately overrides it to **0.0**.
+Remaining `(empty)` values are legitimate — genuinely empty arrays on the default side.
+
+#### ⚠ Two NEW gaps found by reading the verified output
+
+**N1 — output-pin identity is dropped on multi-output nodes (HIGH; the biggest remaining
+expression gap).** `BuildExpressionFromPin` is *given* the specific output pin but the
+function-call and generic branches render only the node title, so which output was read is
+lost. Real examples from the verified dumps:
+- `Break S Player Input State(CharacterInputState)` — which member? (`WantsToSprint` is the
+  answer, and it is invisible)
+- `Select(WalkSpeeds, RunSpeeds, SprintSpeeds, Gait)` appears **twice** in `CalculateMaxSpeed`
+  — once for the range Min and once for the Max, indistinguishable
+- `Conv_Vector2DToVector(?, Get IA_Move, Get IA_Move, 0.000000)` — X and Y both print as the
+  same label
+
+**Fix:** when the source node has more than one data output pin, append the pin name —
+`Break S Player Input State(CharacterInputState).WantsToSprint`, or just `.X` / `.Min`.
+Cheap: the pin is already in hand at the top of the function.
+
+**N2 — expression depth truncation is SILENT (MEDIUM).** At `MaxDepth` the walker returns
+the bare node title, which is indistinguishable from a genuine zero-argument call. In
+`CanSprint`, `Conv_VectorToRotator(Select)` is depth 6 being hit — that `Select` has
+arguments, they were just not printed, and nothing says so. This is the same defect class
+as 0.9's `(automatic)` vs `(unresolved)` fix, in the walker instead of the transition
+labeller. **Fix:** emit a marker, e.g. `Select(...)` or `Select…`, and consider depth 8.
+
+Minor polish observed, not worth its own round: world-context pins render as a leading `?`
+(`HandleTransformTrajectoryWorldCollisions(?, Self-Reference, …)`); split-struct pins
+fabricate zeros (`GreaterGreater_VectorRotator(…, 0, 0, 0, 0.0, 0.0, …)`).
+
+⚠ **Still unexercised after two verification rounds:** the 0.8 parenthesisation fix. GASP's
+50 transition rules are all simple calls (`IsMoving()`, `NOT IsMoving()`,
+`MovementMode == InAir`), so no rule mixing `&&`/`||` has ever been dumped. Same note as
+2026-07-06 — it needs an authored test rule, or TCF content, to validate.
 
 ## Parked ideas (only if a concrete need appears)
 
@@ -656,18 +723,22 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
    notify tracks) is the remaining item** and is what makes "how long is the deflect
    window" answerable.
 
-### Next session (2026-07-26 exit state)
+### Next session (2026-07-26 exit state — VERIFIED, tool is TCF-ready)
 
-1. **Machine-2 compile + the acceptance lists** (M2 acceptance above, and the Phase 0 / M1
-   list below). Two new module deps — `AIModule`, `AssetRegistry` — are the likeliest
-   build snag; nothing in this round could be compiled on machine 1.
-2. **Verification re-dumps, diffed against the 2026-07-19 baselines**: `ABP_Hero` and
-   `BP_BaseCharacter`. Expression output should gain arguments everywhere; the Class
-   Defaults section should be unchanged EXCEPT where instanced properties now expand.
-3. Then a small `DumpBPFolder` smoke run before the full TCF pass — one leaf folder, check
-   the manifest arithmetic, then go wide.
-4. Remaining tool work, in value order: **T4** → Gap 1.5 (Property Access reflection) →
-   1.3b/1.4b → rest of Phase 2.
+Compile + all acceptance done same day; see the checked boxes above. Remaining work, in
+value order:
+
+1. **N1 — output-pin identity on multi-output nodes.** The biggest remaining expression
+   gap, and cheap. Do before the TCF pass: TCF is 100% Blueprint, so every Break-struct
+   read in 319 files inherits this ambiguity.
+2. **N2 — silent depth truncation marker.** Tiny, and it removes a false-negative class
+   from every dump we read as ground truth.
+3. **T4 — montage notify tracks.** The "how long is the deflect window" answer.
+4. Gap 1.5 (Property Access reflection) → 1.3b/1.4b → rest of Phase 2.
+
+**The TCF pass itself is unblocked** — but note TCF is not mounted in the host project
+(source-only copy on machine 1). It needs the plugin installed to the engine, or a
+throwaway project with TCF + this plugin enabled, before `DumpBPFolder` can reach it.
 
 ## Acceptance Checklist (Phase 0 / M1)
 
@@ -682,12 +753,24 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 - [ ] Class Defaults section: `DumpBP` on a character BP lists a knob deliberately changed
   in Class Defaults (incl. one on the movement component) with both values; an untouched
   knob is absent; the section header + `(not listed = inherited default)` footer always print
-- [ ] **M1 known-answer**: `CanSprint` re-dump renders BOTH operands of the AND (not
-  `BooleanAND()`), and `Get_DynamicPlayRate`'s `Lerp` shows its arguments
-- [ ] **String literals**: `GetCurveValueFromAnimation` renders its curve-name argument,
-  quoted, and the four call sites are no longer identical
-- [ ] **No expression blow-up**: depth 6 did not produce unreadable mega-lines in the
-  ABP transition rules (spot-check the longest rules; drop to 5 if it did)
+- [x] **M1 known-answer** — **PASSED, exactly.** `Get_DynamicPlayRate` now dumps
+  `Lerp(1.000000, FClamp(SafeDivide(Speed2D, FClamp(SpeedCurve, 1.000000, 999.000000)),
+  MinDynamicPlayRate, MaxDynamicPlayRate), AlphaCurve)` — character-for-character the
+  formula this document recorded as the unreachable "REAL" answer under Gap 1.1.
+- [x] **String literals** — **PASSED.** The four `GetCurveValueFromAnimation` calls that
+  Gap 1.2 cited as "appears 4 times identically" now read
+  `GetCurveValueFromAnimation(AnimSequence, "Enable_Warping", AnimTime)`,
+  `"MoveData_Speed"`, `"MaxDynamicPlayRate"`, `"MinDynamicPlayRate"`. Also recovers
+  literal arrays: `Select("StrafeOffset_F", "StrafeOffset_B", "StrafeOffset_LL", …,
+  MovementDirection)`.
+- [x] **No expression blow-up** — **PASSED.** Largest dump 872 lines; longest expressions
+  are dense but readable; the cycle / depth-limit / already-shown guards fired **zero**
+  times across all 71 files. Depth 6 stays.
+
+**Recreatability score: the 2026-07-02 GASP baseline was 1 of 6 functions.**
+`Get_DynamicPlayRate` and `Get_MMBlendTime` are now fully recreatable, `CanSprint` /
+`CalculateMaxSpeed` likewise; the residue on the rest is N1 (output-pin identity), not
+missing data flow.
 
 ---
 
