@@ -627,7 +627,7 @@ The host project's `CLAUDE.md` carried `⚠ StartRotationOWThreshold "(empty)" v
 — verify intent` as an open item. It is answered: the BP deliberately overrides it to **0.0**.
 Remaining `(empty)` values are legitimate — genuinely empty arrays on the default side.
 
-#### ⚠ Two NEW gaps found by reading the verified output
+#### ⚠ Two NEW gaps found by reading the verified output — ✅ BOTH FIXED same day (see changelog)
 
 **N1 — output-pin identity is dropped on multi-output nodes (HIGH; the biggest remaining
 expression gap).** `BuildExpressionFromPin` is *given* the specific output pin but the
@@ -725,16 +725,13 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 
 ### Next session (2026-07-26 exit state — VERIFIED, tool is TCF-ready)
 
-Compile + all acceptance done same day; see the checked boxes above. Remaining work, in
-value order:
+Compile + all acceptance done same day; N1/N2 fixed on top (⚠ that fix is itself
+uncompiled). Remaining work, in value order:
 
-1. **N1 — output-pin identity on multi-output nodes.** The biggest remaining expression
-   gap, and cheap. Do before the TCF pass: TCF is 100% Blueprint, so every Break-struct
-   read in 319 files inherits this ambiguity.
-2. **N2 — silent depth truncation marker.** Tiny, and it removes a false-negative class
-   from every dump we read as ground truth.
-3. **T4 — montage notify tracks.** The "how long is the deflect window" answer.
-4. Gap 1.5 (Property Access reflection) → 1.3b/1.4b → rest of Phase 2.
+1. **Verify N1/N2** on a re-dump — the known-answers are listed in the changelog entry.
+2. **T4 — montage notify tracks.** The "how long is the deflect window" answer.
+3. Gap 1.5 (Property Access reflection) → 1.3b/1.4b → rest of Phase 2.
+4. An authored `&&`/`||` transition rule somewhere, to finally exercise the 0.8 parens fix.
 
 **The TCF pass itself is unblocked** — but note TCF is not mounted in the host project
 (source-only copy on machine 1). It needs the plugin installed to the engine, or a
@@ -775,6 +772,34 @@ missing data flow.
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-26 (3rd round) — N1 + N2 (⚠ pending machine-2 compile + verification)
+
+**N1 — output-pin identity.** New `QualifyOutput` helper, applied at every return site in
+`BuildExpressionFromPin` that can serve a multi-output node (7 sites):
+- **Split struct sub-pins** → `.X` / `.Y` (derived by stripping the parent pin's name), so
+  `Conv_Vector2DToVector(?, Get IA_Move, Get IA_Move, 0.0)` becomes `…, Get IA_Move.X,
+  Get IA_Move.Y, …` and a struct `Select` feeding a range's Min and Max stops rendering
+  identically for both.
+- **Nodes with >1 top-level data output** (function out-params) → `.PinName`. Sub-pins of a
+  split output are excluded from that count, or every split node would be "multi-output".
+- **`UK2Node_BreakStruct` gets a dedicated rendering**: `Source.Member` instead of
+  `Break Foo(Source)`. `Break S Player Input State(CharacterInputState)` →
+  `CharacterInputState.WantsToSprint` — the member IS the information.
+
+**N2 — depth truncation is no longer silent.** At `MaxDepth` the walker appended nothing,
+so a truncated node read exactly like a genuine zero-argument call. It now emits `Title(...)`
+whenever the node actually has data inputs (`HasDataInput`), and `DefaultExpressionDepth`
+goes **6 → 8** — GASP's `CanSprint` truncated at 7. The marker is the safety net: if 8 is
+still short, the dump says so instead of lying.
+
+**Known-answers for the next verification round:**
+- `CanSprint` — the previously-bare `Conv_VectorToRotator(Select)` must now be either fully
+  expanded (depth 8) or explicitly `Select(...)`; and the AND's first operand should read
+  `CharacterInputState.WantsToSprint`-style rather than `Break S Player Input State(…)`.
+- `CalculateMaxSpeed` — the two `Select(WalkSpeeds, RunSpeeds, SprintSpeeds, Gait)` args
+  must now differ from each other.
+- Eyeball line length: depth 8 is the readability risk. Drop to 7 if it bites.
 
 ### 2026-07-26 — M1 core + M2 T1/T2/T3 (⚠ pending machine-2 compile + verification)
 

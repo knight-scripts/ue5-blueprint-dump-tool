@@ -31,6 +31,7 @@
 #include "K2Node_Knot.h"
 #include "K2Node_ExecutionSequence.h"
 #include "K2Node_SwitchEnum.h"
+#include "K2Node_BreakStruct.h"
 
 // ============================================================================
 // Pin helpers
@@ -367,6 +368,64 @@ FString FBlueprintDumpUtils::ResolveOperatorFromTitle(const FString& Title)
 	return ResolveOperatorSymbol(FirstWord);
 }
 
+namespace
+{
+	/** Any data input worth resolving? Used to decide whether a depth-truncated node
+	 *  should be marked — a bare title is otherwise indistinguishable from a real
+	 *  zero-argument call. */
+	bool HasDataInput(const UEdGraphNode* Node)
+	{
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin->Direction == EGPD_Input
+				&& Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec
+				&& Pin->PinName != TEXT("self"))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** WHICH output was read is information the node title alone does not carry: a struct
+	 *  Select feeding a range's Min and Max renders identically for both, and split pins
+	 *  make X and Y the same string. Qualify the expression with the pin that produced it. */
+	FString QualifyOutput(const FString& Expr, const UEdGraphPin* Pin, const UEdGraphNode* Node)
+	{
+		if (!Pin || !Node)
+		{
+			return Expr;
+		}
+
+		// Split struct sub-pin: "ReturnValue_X" under parent "ReturnValue" -> ".X"
+		if (const UEdGraphPin* Parent = Pin->ParentPin)
+		{
+			const FString Full = Pin->PinName.ToString();
+			const FString ParentName = Parent->PinName.ToString();
+			const FString Sub = Full.StartsWith(ParentName + TEXT("_"))
+				? Full.RightChop(ParentName.Len() + 1)
+				: Full;
+			return Sub.IsEmpty() ? Expr : Expr + TEXT(".") + Sub;
+		}
+
+		// Several data outputs (function out-params, multi-output nodes): name the one read.
+		// Top-level pins only — sub-pins of a split output are not separate outputs.
+		int32 DataOutputs = 0;
+		for (const UEdGraphPin* Other : Node->Pins)
+		{
+			if (Other->Direction == EGPD_Output
+				&& Other->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec
+				&& !Other->ParentPin)
+			{
+				++DataOutputs;
+			}
+		}
+
+		const FString PinNameStr = Pin->PinName.ToString();
+		return (DataOutputs > 1 && !PinNameStr.IsEmpty()) ? Expr + TEXT(".") + PinNameStr : Expr;
+	}
+}
+
 FString FBlueprintDumpUtils::FormatLiteralPinValue(const UEdGraphPin* Pin)
 {
 	if (!Pin)
@@ -435,7 +494,13 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 	{
 		FString Title = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
 		Title.ReplaceInline(TEXT("\n"), TEXT(" "));
-		return Title.IsEmpty() ? Node->GetName() : Title;
+		if (Title.IsEmpty())
+		{
+			Title = Node->GetName();
+		}
+		// Silence is a bug signal: a bare title here reads exactly like a genuine
+		// zero-argument call. Mark the truncation whenever inputs actually exist.
+		return HasDataInput(Node) ? QualifyOutput(Title + TEXT("(...)"), Pin, Node) : Title;
 	}
 
 	// Wrap nested operator results so precedence survives reconstruction:
@@ -490,10 +555,28 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 		}
 	}
 
-	// Variable Get node — return the variable name
+	// Break struct — the MEMBER read is the whole point. "Break S Player Input
+	// State(CharacterInputState)" says nothing; "CharacterInputState.WantsToSprint" is
+	// what the graph actually means.
+	if (Cast<UK2Node_BreakStruct>(Node))
+	{
+		for (UEdGraphPin* InputPin : Node->Pins)
+		{
+			if (InputPin->Direction == EGPD_Input
+				&& InputPin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec
+				&& InputPin->LinkedTo.Num() > 0
+				&& InputPin->LinkedTo[0])
+			{
+				const FString Source = BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1);
+				return Source + TEXT(".") + Pin->PinName.ToString();
+			}
+		}
+	}
+
+	// Variable Get node — return the variable name (qualified if the output is split)
 	if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(Node))
 	{
-		return VarGet->GetVarName().ToString();
+		return QualifyOutput(VarGet->GetVarName().ToString(), Pin, Node);
 	}
 
 	// Function call node — could be an operator or a function
@@ -552,7 +635,10 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 
 			if (Operands.Num() >= 2)
 			{
-				return Grouped(FString::Printf(TEXT("%s %s %s"), *Operands[0], *OpSymbol, *Operands[1]));
+				// Qualified for the split-output case: (A + B).X on a vector operator
+				return QualifyOutput(
+					Grouped(FString::Printf(TEXT("%s %s %s"), *Operands[0], *OpSymbol, *Operands[1])),
+					Pin, Node);
 			}
 			if (Operands.Num() == 1)
 			{
@@ -591,7 +677,10 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 				Args.Pop();
 			}
 
-			return FString::Printf(TEXT("%s(%s)"), *FuncNameStr, *FString::Join(Args, TEXT(", ")));
+			// Qualified: a function with out-params renders identically for each of them
+			return QualifyOutput(
+				FString::Printf(TEXT("%s(%s)"), *FuncNameStr, *FString::Join(Args, TEXT(", "))),
+				Pin, Node);
 		}
 	}
 
@@ -629,13 +718,16 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 			return Grouped(FString::Printf(TEXT("%s %s %s"), *Operands[0], *OpSymbol, *Operands[1]));
 		}
 
-		// Not an operator — format with inputs if available
+		// Not an operator — format with inputs if available. Qualified, because this is
+		// where multi-output nodes (struct Selects, split pins) land.
 		if (Operands.Num() > 0)
 		{
-			return FString::Printf(TEXT("%s(%s)"), *NodeTitle, *FString::Join(Operands, TEXT(", ")));
+			return QualifyOutput(
+				FString::Printf(TEXT("%s(%s)"), *NodeTitle, *FString::Join(Operands, TEXT(", "))),
+				Pin, Node);
 		}
 
-		return NodeTitle.IsEmpty() ? Node->GetName() : NodeTitle;
+		return QualifyOutput(NodeTitle.IsEmpty() ? Node->GetName() : NodeTitle, Pin, Node);
 	}
 }
 

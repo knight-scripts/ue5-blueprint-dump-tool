@@ -57,8 +57,10 @@ public:
 
 	/** Default depth for data-pin expression reconstruction. Function-argument recursion
 	 *  (Lerp(Clamp(SafeDivide(...)))) routinely runs 4-5 levels deep, so 4 truncated the
-	 *  exact formulas M1 exists to recover. */
-	static constexpr int32 DefaultExpressionDepth = 6;
+	 *  exact formulas M1 exists to recover. Raised 6 -> 8 after the 2026-07-26 verification
+	 *  found GASP's CanSprint truncating at 7; truncation is now MARKED with "(...)", so if
+	 *  8 is still short it shows up in the dump instead of reading as a zero-arg call. */
+	static constexpr int32 DefaultExpressionDepth = 8;
 
 	/** Recursively build expression string walking backward from a pin.
 	 *  No visited set: valid BP data graphs are DAGs (the compiler rejects true cycles),
