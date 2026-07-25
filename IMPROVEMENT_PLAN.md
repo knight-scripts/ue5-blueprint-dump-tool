@@ -443,14 +443,124 @@ every anim node at once.
 
 ---
 
+## Milestone 2 — TCF decode enablement (ADDED 2026-07-26) ⚠ NEW, blocks a scheduled decode
+
+> **Why this exists now.** `TEMPEST_TCF_DECODE_2026_07_25.md` (workspace) decoded the Tempest
+> Combat Framework's C++ and found it is a **skeleton**: 50+ empty `_Implementation` bodies,
+> with all actual combat policy living in **319 Blueprint uassets** (54 Abilities · 37 States ·
+> 41 Notifies · 22 BehaviorProperties · 22 Input · 12 AttackProperties · 7 Buffers · 7 Camera ·
+> 6 Feel · 5 RotationProperties · 3 DataAssets · BT/BB · 23 Structs&Enums). That decode's §9
+> names a machine-2 dump pass as the follow-up that would convert the policy layer to text —
+> the same move the GASP dumps made for locomotion. **This milestone is what the tool needs
+> before that pass is worth running.** Same applies to any future purchased-plugin decode
+> (Narrative 3's quest/dialogue graphs, NinjaCombat content) — TCF is just the forcing case.
+>
+> Ordering: **M1 still comes first** (a batch dump of unreadable expressions is 319 unreadable
+> files). T1/T2 are what make TCF-shaped assets dumpable at all; T3 makes the pass practical.
+
+### T1 — Instanced sub-object properties are not recursed into ⚠ **CRITICAL / the blocker**
+
+TCF's entire authoring model is `UPROPERTY(Instanced, EditAnywhere)` UObjects and arrays of
+them: `FInstancedAttackProperties`, `ImpactProperties[]`, `AttackPropertyTraits[]`,
+`FInstancedFeelProperties`, `CameraProperties[]`, `RotationPropertiesToPerform[]`,
+`BufferInfo[]` (input action → buffer property), `FInstanced_AI_BehaviorProperty`.
+
+Current behavior (`DumpClassDefaultOverrides` → `AppendPropertyDiffs`, `BlueprintDumpUtils.cpp:1443`):
+- `AppendPropertyDiffs` prints each differing property via `ExportPropertyValue` — for an
+  instanced UObject that is an **object reference/path, not the object's contents**.
+- The only recursion is `AppendSubobjectDiffs`, reached from `CDO->GetDefaultSubobjects()`
+  (constructor-created components) and SCS component templates — neither enumerates
+  details-panel-authored instanced property values reliably.
+- ⚠ And `AppendSubobjectDiffs` **early-outs when `Archetype->GetClass() != Sub->GetClass()`**
+  ("field diff undefined") — which is precisely the instanced case, where the author picks a
+  *subclass* in the details panel.
+
+⇒ Dumping `AttackProperty_LightAttack` today would emit its tag and little else; the traits,
+impacts and tuned numbers — the whole reason to dump it — stay invisible. **Fix:** walk
+`FObjectProperty` (and `FArrayProperty` of object) values whose property has `CPF_InstancedReference`
+/ whose class is `EditInlineNew`; recurse with the sub-object's own **class CDO** as the archetype
+when the class differs (that is the correct comparison, and it removes the early-out); indent
+and depth-cap (suggest 4) with a cycle guard.
+
+### T2 — Non-Blueprint asset types are silently unsupported ⚠ **CRITICAL**
+
+`FBlueprintDumper::DumpBlueprint` does `LoadObject<UBlueprint>(...)` and returns empty on
+failure (`BlueprintDumper.cpp`), so every non-BP asset is a no-op — and the failure is quiet.
+TCF needs, in rough priority order:
+
+1. **`UDataAsset` / `UPrimaryDataAsset`** — property dump w/ T1 recursion (TCF DataAssets;
+   also NinjaGAS's `UNinjaGASDataAsset` loadout pattern, Narrative's Default* libraries).
+2. **`UAnimMontage`** — see T4.
+3. **`UBehaviorTree` + `UBlackboardData`** — node tree w/ decorators/services/task params
+   and BB key list (TCF's `TCF_BT`/`TCF_BB`, and the P-1 AI question generally).
+4. **`UUserDefinedStruct` / `UUserDefinedEnum`** — field/enumerator lists (23 assets; needed
+   to read everything else).
+5. **`UCurveFloat` / `UCurveVector`** — key list. *(Would also have made today's
+   `Curve_StrafeSpeedMap` read exact instead of pixel-measured off a screenshot — see the
+   sprint decode §2d "±3°" caveat.)*
+6. **`UDataTable`** — row-struct + rows.
+
+Minimum viable: dispatch on loaded `UObject` class, fall back to a generic
+"class + property diff vs CDO (with T1 recursion)" dumper, and **name the asset type in the
+header** so an unsupported type is loud, not silent (doctrine: silence is a bug signal).
+
+### T3 — Batch / recursive folder dump + manifest — **HIGH** (promoted from Parked)
+
+319 assets cannot be dumped by hand. Wanted: `DumpBPFolder /Game/Path [-recursive]` that walks
+the asset registry, dispatches per type (T2), writes one file per asset into a mirrored
+directory tree, and emits a **manifest** listing `asset → type → dumped | skipped(reason)`.
+The manifest is the acceptance artifact: it makes coverage auditable instead of assumed.
+Cheap add-on: `-filter=Class` and a summary line (`N dumped, M skipped`).
+
+### T4 — AnimMontage notify tracks — **HIGH** (promoted from Parked "Animation metadata inline")
+
+TCF's combat *timing* lives on montages, not in classes: `ANS_AttackTrace` (carries an
+instanced attack property), `ANS_SetAllowedInputs` (carries `AllowedInputs[]` — the input
+buffer window), `ANS_TempestStandardRotation` / `ANS_RotateToInputDirectionCPP`, plus
+NinjaGAS's `AnimNotifyState_ApplyGameplayEffect` / `_ApplyLooseGameplayTags`.
+
+Wanted per montage: sections + slots, and per notify **class · track · start time · duration ·
+its own properties (T1 recursion)**. Without this, "how long is the deflect window" — the
+question the decode exists to answer — is unanswerable. Reuse for our own project is immediate
+(H10 commitment windows, jump-program window forensics).
+
+### T5 — M1 is reinforced, not replaced (evidence from 2026-07-25)
+
+The sprint decode hit **Gap 1.1 (pure function arguments)** and **Gap 1.4 (BooleanAND/OR
+operands)** head-on: `SandboxCharacter_CMC_Dump.txt` renders `CanSprint() -> Return (Return
+Value=BooleanAND())` and `CalculateMaxSpeed -> Return (Return Value=SelectFloat())`, so the
+sprint gate's whole condition had to be recovered from screenshots instead. Note `BooleanAND`
+**is** in `ResolveOperatorSymbol`'s map, and sibling functions in the same dump *do* expand
+(`Select(2000.000000, 500.000000, HasMovementInputVector)`) — so this is a **path-specific
+collapse, not a missing feature**, and the published dump may also predate current code on
+machine 2. ⇒ Before coding M1: **re-dump one known asset and diff**, to establish whether the
+gap is in `GetDataInputSummary`'s Return handling, in the `UK2Node_CallFunction` early-out
+(`return FuncNameStr;`, `BlueprintDumpUtils.cpp:520`), or already fixed. Known-answer target:
+`CanSprint` must render `WantsToSprint && (OrientRotationToMovement ? true : |Δyaw| < 50)`-
+equivalent structure.
+
+For TCF this is existential, not cosmetic: **100 % of TCF's logic is Blueprint**, so an
+expression-collapsing dump of 319 assets produces 319 files of node names.
+
+### M2 acceptance (known-answer, per the project's decoder-test doctrine)
+
+- [ ] T1: dump one TCF AttackProperty BP → its instanced traits/impacts and their tuned values appear, nested and indented
+- [ ] T1: an instanced property whose value is a *subclass* of the declared type still dumps (no "field diff undefined" skip)
+- [ ] T2: `DumpBP` on a DataAsset / BT / Struct / Curve → real content, and an unsupported type prints a loud reason
+- [ ] T3: folder dump of `TempestCombatFramework/Content` → manifest row count == asset count; skipped rows carry reasons
+- [ ] T4: dump a montage carrying `ANS_AttackTrace` → notify class, start, duration, and the instanced attack property all present
+- [ ] T5: `CanSprint` re-dump renders both operands of the AND (the M1 known-answer above)
+- [ ] Re-dump our own `BP_BaseCharacter` + `ABP_Hero` and diff vs the 2026-07-19 baselines — no regressions from T1's recursion
+
 ## Parked ideas (only if a concrete need appears)
 
 Speculative "grow it into a product" milestones, cut to keep the plan focused on making dumps
 trustworthy (Phase 0 + M1). One line each so the idea survives — git history has the full
 write-ups if any is ever revived. (JSON output was dropped outright: plain text stays the format.)
 
-- **Batch dump + scan manifest** — dump a whole folder; list supported vs unsupported assets.
-- **Animation metadata inline** — clip duration, curves, root motion, notifies next to Sequence Players. *(Closest to actually useful — fits the curve-driven work.)*
+- ~~**Batch dump + scan manifest**~~ — **PROMOTED 2026-07-26 → M2/T3** (TCF needs 319 assets).
+- ~~**Animation metadata inline**~~ — notify half **PROMOTED 2026-07-26 → M2/T4**; the rest
+  (clip duration, curves, root motion next to Sequence Players) stays parked here.
 - **Blend Space details** — axes, sample points. *(Project uses discrete directional clips, not blendspaces.)*
 - **Chooser Table dumping** — Motion-Matching selection logic. *(GASP reference only; project doesn't use choosers.)*
 - **Reroute node collapse** — skip visual-only routing nodes in pose-chain output.
@@ -499,7 +609,12 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
    (doubles as an overdue re-dump — code has moved since the last baseline).
 6. Then start **M1** with the review's fidelity gaps (1.1b–1.5b) added to its gap list —
    consolidate the three source-label summarizers first (Phase 2) since all three need the
-   same M1 upgrade.
+   same M1 upgrade. **Start M1 with the T5 re-dump-and-diff** — it may narrow (or close)
+   Gaps 1.1/1.3/1.4 before a line is written.
+7. **M2 (TCF enablement)** when a purchased-plugin decode is actually scheduled — order
+   **T1 → T2 → T3 → T4**. T1 alone is worth landing early: it also improves our own
+   character/ABP dumps wherever instanced properties appear. Do NOT run the 319-asset pass
+   before M1 lands; unreadable expressions × 319 files is worse than no dump.
 
 ## Acceptance Checklist (Phase 0 / M1)
 
