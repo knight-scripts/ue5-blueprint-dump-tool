@@ -192,6 +192,31 @@ only when `bAutomaticRuleBasedOnSequencePlayerInState` / the logic type actually
 
 ## Milestone 1: Data Pin Source Wiring (HIGHEST PRIORITY — #1)
 
+> **✅ CORE LANDED 2026-07-26 — Gaps 1.1 / 1.2 / 1.4 / 1.6 were ONE defect, and T5's
+> open question was answered by reading the code, not by a re-dump.**
+>
+> The collapse was a `UK2Node_CallFunction` early-out that emitted `MemberName + "()"`
+> and never consulted the node's pins — hand-copied into **three** places
+> (`GetDataInputSummary`, `WalkExecChain`'s VariableSet case, `FormatDataPins`), plus
+> `BuildExpressionFromPin`'s own `return FuncNameStr;`. That is why `BooleanAND()`
+> collapsed while `Select(2000.0, 500.0, HasMovementInputVector)` expanded in the SAME
+> dump: `UK2Node_Select` is not a `CallFunction`, so it fell through to the generic
+> recursion. Not a missing feature — a short-circuit on one node class.
+>
+> Fix: all four sites now route through one `ResolvePinSourceLabel`, and
+> `BuildExpressionFromPin` recurses into function arguments. String/name/text literals
+> are quoted (Gap 1.2 needed no filter change — the filter was simply never reached).
+> Data-pin depth 4 → 6 (`DefaultExpressionDepth`), since the formulas M1 exists to
+> recover run 4-5 levels deep.
+>
+> **⚠ Gap 1.3 (Return values) was ALREADY CLOSED before this round** — the sprint
+> decode's own `Return (Return Value=BooleanAND())` proves the pin was read; only the
+> expression collapsed. The "easiest fix, huge payoff" ranking below is stale.
+>
+> Still open in M1: **Gap 1.5 (Property Access deep paths)** — the FullTitle
+> second-line fallback still carries it; the reflection route (`TextPath`/`Path`) is
+> unimplemented.
+
 ### Problem
 Anim nodes and BP function nodes have data pins (colored wires — float, bool, enum, struct) that drive behavior at runtime. This is the **single biggest gap** in the plugin — proven by side-by-side comparison of a GASP dump vs a hand-written GASP analysis.
 
@@ -443,7 +468,11 @@ every anim node at once.
 
 ---
 
-## Milestone 2 — TCF decode enablement (ADDED 2026-07-26) ⚠ NEW, blocks a scheduled decode
+## Milestone 2 — TCF decode enablement (ADDED 2026-07-26)
+
+> **✅ T1 / T2 / T3 LANDED 2026-07-26 (same day as M1's core).** T4 (montage notify
+> tracks) is the one remaining item. See the changelog for what each became, and the
+> M2 acceptance list below for what machine 2 still has to confirm.
 
 > **Why this exists now.** `TEMPEST_TCF_DECODE_2026_07_25.md` (workspace) decoded the Tempest
 > Combat Framework's C++ and found it is a **skeleton**: 50+ empty `_Implementation` bodies,
@@ -465,15 +494,17 @@ them: `FInstancedAttackProperties`, `ImpactProperties[]`, `AttackPropertyTraits[
 `FInstancedFeelProperties`, `CameraProperties[]`, `RotationPropertiesToPerform[]`,
 `BufferInfo[]` (input action → buffer property), `FInstanced_AI_BehaviorProperty`.
 
-Current behavior (`DumpClassDefaultOverrides` → `AppendPropertyDiffs`, `BlueprintDumpUtils.cpp:1443`):
-- `AppendPropertyDiffs` prints each differing property via `ExportPropertyValue` — for an
-  instanced UObject that is an **object reference/path, not the object's contents**.
-- The only recursion is `AppendSubobjectDiffs`, reached from `CDO->GetDefaultSubobjects()`
-  (constructor-created components) and SCS component templates — neither enumerates
-  details-panel-authored instanced property values reliably.
-- ⚠ And `AppendSubobjectDiffs` **early-outs when `Archetype->GetClass() != Sub->GetClass()`**
-  ("field diff undefined") — which is precisely the instanced case, where the author picks a
-  *subclass* in the details panel.
+⚠ **Diagnosis corrected on implementation (2026-07-26) — it was WORSE than written here.**
+The original text said instanced properties printed "an object reference/path, not the
+object's contents". They printed **nothing at all**: `SkipDiffPropertyFlags` hard-filtered
+`CPF_InstancedReference | CPF_PersistentInstance | CPF_ContainsInstancedReference`, a noise
+filter added by the 2026-07-19 Class-Defaults work for the correct local reason (instanced
+POINTERS always differ between a BP CDO and its parent CDO). So an AttackProperty's traits
+were not merely opaque — they were absent, with no marker. Silence, again.
+
+Confirmed as written: `AppendSubobjectDiffs` **early-outs when
+`Archetype->GetClass() != Sub->GetClass()`** ("field diff undefined") — precisely the
+details-panel case where the author picks a *subclass*.
 
 ⇒ Dumping `AttackProperty_LightAttack` today would emit its tag and little else; the traits,
 impacts and tuned numbers — the whole reason to dump it — stay invisible. **Fix:** walk
@@ -524,7 +555,7 @@ its own properties (T1 recursion)**. Without this, "how long is the deflect wind
 question the decode exists to answer — is unanswerable. Reuse for our own project is immediate
 (H10 commitment windows, jump-program window forensics).
 
-### T5 — M1 is reinforced, not replaced (evidence from 2026-07-25)
+### T5 — M1 is reinforced, not replaced (evidence from 2026-07-25) — ✅ ANSWERED 2026-07-26
 
 The sprint decode hit **Gap 1.1 (pure function arguments)** and **Gap 1.4 (BooleanAND/OR
 operands)** head-on: `SandboxCharacter_CMC_Dump.txt` renders `CanSprint() -> Return (Return
@@ -539,10 +570,20 @@ gap is in `GetDataInputSummary`'s Return handling, in the `UK2Node_CallFunction`
 `CanSprint` must render `WantsToSprint && (OrientRotationToMovement ? true : |Δyaw| < 50)`-
 equivalent structure.
 
+**✅ Verdict (2026-07-26): the `UK2Node_CallFunction` early-out — in all three copies of it,
+plus the walker's own `return FuncNameStr;`.** Return-value handling was already fine. The
+re-dump-and-diff was not needed to establish this; reading the two functions settled it, and
+the `Select(...)`-expands-while-`BooleanAND()`-collapses asymmetry is explained exactly by
+which node classes hit the early-out. The re-dump is still owed — as **verification** of the
+fix (the `CanSprint` known-answer above), not as diagnosis.
+
 For TCF this is existential, not cosmetic: **100 % of TCF's logic is Blueprint**, so an
 expression-collapsing dump of 319 assets produces 319 files of node names.
 
 ### M2 acceptance (known-answer, per the project's decoder-test doctrine)
+
+> Code landed 2026-07-26; **every box below is still unchecked and machine-2-owned.**
+> Nothing here has been compiled or run — machine 1 has no engine.
 
 - [ ] T1: dump one TCF AttackProperty BP → its instanced traits/impacts and their tuned values appear, nested and indented
 - [ ] T1: an instanced property whose value is a *subclass* of the declared type still dumps (no "field diff undefined" skip)
@@ -571,10 +612,9 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 ## Phase 2 — Hygiene batch (anytime, low risk)
 
 - **LogTemp everywhere** → dedicated `LogBlueprintDump` category, enables verbosity control.
-- **Triplicated source-label logic**: `FormatDataPins` (`AnimBPDumper.cpp:739`) ≈
-  `GetDataInputSummary` (`BlueprintDumpUtils.cpp:607`), plus a third copy in
-  `WalkExecChain`'s VariableSet special case (`BlueprintDumpUtils.cpp:721-754`).
-  Consolidate BEFORE M1 — all three need the same M1 upgrade; do it once.
+- ~~**Triplicated source-label logic**~~ — **DONE 2026-07-26** as part of M1's core: all
+  three collapsed onto `ResolvePinSourceLabel`. Not hygiene in the end — the duplication
+  was where the M1 data-loss bug lived, in triplicate.
 - **`DumpBP` writes into `Saved/AnimBPDumps/`** (`BlueprintDumper.cpp:40`) — misnomer;
   either rename dir to `BlueprintDumps` split by type or a shared `Dumps/`.
 - **`"Kismet"` in Build.cs** appears unused — try removing.
@@ -611,10 +651,23 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
    consolidate the three source-label summarizers first (Phase 2) since all three need the
    same M1 upgrade. **Start M1 with the T5 re-dump-and-diff** — it may narrow (or close)
    Gaps 1.1/1.3/1.4 before a line is written.
-7. **M2 (TCF enablement)** when a purchased-plugin decode is actually scheduled — order
-   **T1 → T2 → T3 → T4**. T1 alone is worth landing early: it also improves our own
-   character/ABP dumps wherever instanced properties appear. Do NOT run the 319-asset pass
-   before M1 lands; unreadable expressions × 319 files is worse than no dump.
+7. ~~**M2 (TCF enablement)**~~ — **T1/T2/T3 LANDED 2026-07-26** alongside M1's core, in
+   that order, so the 319-asset pass is not gated on unreadable expressions. **T4 (montage
+   notify tracks) is the remaining item** and is what makes "how long is the deflect
+   window" answerable.
+
+### Next session (2026-07-26 exit state)
+
+1. **Machine-2 compile + the acceptance lists** (M2 acceptance above, and the Phase 0 / M1
+   list below). Two new module deps — `AIModule`, `AssetRegistry` — are the likeliest
+   build snag; nothing in this round could be compiled on machine 1.
+2. **Verification re-dumps, diffed against the 2026-07-19 baselines**: `ABP_Hero` and
+   `BP_BaseCharacter`. Expression output should gain arguments everywhere; the Class
+   Defaults section should be unchanged EXCEPT where instanced properties now expand.
+3. Then a small `DumpBPFolder` smoke run before the full TCF pass — one leaf folder, check
+   the manifest arithmetic, then go wide.
+4. Remaining tool work, in value order: **T4** → Gap 1.5 (Property Access reflection) →
+   1.3b/1.4b → rest of Phase 2.
 
 ## Acceptance Checklist (Phase 0 / M1)
 
@@ -629,10 +682,82 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 - [ ] Class Defaults section: `DumpBP` on a character BP lists a knob deliberately changed
   in Class Defaults (incl. one on the movement component) with both values; an untouched
   knob is absent; the section header + `(not listed = inherited default)` footer always print
+- [ ] **M1 known-answer**: `CanSprint` re-dump renders BOTH operands of the AND (not
+  `BooleanAND()`), and `Get_DynamicPlayRate`'s `Lerp` shows its arguments
+- [ ] **String literals**: `GetCurveValueFromAnimation` renders its curve-name argument,
+  quoted, and the four call sites are no longer identical
+- [ ] **No expression blow-up**: depth 6 did not produce unreadable mega-lines in the
+  ABP transition rules (spot-check the longest rules; drop to 5 if it did)
 
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-26 — M1 core + M2 T1/T2/T3 (⚠ pending machine-2 compile + verification)
+
+**M1 core — the expression collapse (Gaps 1.1 / 1.2 / 1.4 / 1.6, and T5's question):**
+- Root cause: a `UK2Node_CallFunction` early-out emitting `MemberName + "()"` without
+  reading the node's pins, hand-copied into `GetDataInputSummary`
+  (`BlueprintDumpUtils.cpp:659`), `WalkExecChain`'s VariableSet case (`:765`) and
+  `FormatDataPins` (`AnimBPDumper.cpp:1102`) — plus `BuildExpressionFromPin`'s own
+  `return FuncNameStr;`.
+- New `FBlueprintDumpUtils::ResolvePinSourceLabel` is now the single "what drives this
+  pin" entry point; all three copies deleted in favour of it (this also closes the
+  Phase 2 "triplicated source-label logic" item, which was never mere hygiene — the
+  duplication WAS the bug's habitat).
+- `BuildExpressionFromPin` recurses into function arguments:
+  `Lerp(1.0, Clamp(SafeDivide(Speed2D, Rate), Min, Max), Alpha)`. Trailing unset optional
+  params are dropped; a gap in the middle stays `?` so argument positions keep meaning.
+- New `FormatLiteralPinValue`: enum-resolved, **string/name/text literals quoted**
+  (`GetCurveValueFromAnimation("MoveData_Speed", t)`), object literals by name via
+  `DefaultObject`, `DefaultTextValue` handled.
+- `DefaultExpressionDepth` 4 → 6 for data pins (transition rules stay at 10).
+
+**M2/T1 — instanced sub-object recursion:**
+- `AppendPropertyDiffs` reworked to walk **value pointers** instead of UObject containers,
+  so it can descend through structs and arrays into instanced content.
+- `CPF_InstancedReference | CPF_PersistentInstance | CPF_ContainsInstancedReference`
+  removed from the skip mask; instead: instanced objects recurse, arrays of them recurse
+  per element (with an element-count line when the count differs), and structs carrying
+  `CPF_ContainsInstancedReference` descend into their fields (the `FInstanced*Properties`
+  wrapper shape).
+- Baseline selection: the archetype counterpart when same-class, else the value's **own
+  class CDO** — which removes the `AppendSubobjectDiffs` "field diff undefined" early-out
+  instead of working around it. Class-overridden subobjects now dump, marked
+  `vs class defaults`.
+- Guards: depth cap 4, cycle guard (`already shown above`), components skipped (owned by
+  the dedicated subobject/SCS passes), and — **found while self-reviewing** — objects
+  outered directly to a package are treated as REFERENCES, not inline content, so an
+  EditInlineNew *asset* pointer cannot splice another asset's guts into the dump.
+- Property names now print via `GetAuthoredNameForField`, so BP-struct fields lose their
+  internal GUID suffix.
+- New public `FBlueprintDumpUtils::DumpObjectPropertyDiffs` — the reusable engine behind
+  T2's generic dumper.
+
+**M2/T2 — non-Blueprint asset types (new `AssetDumper.{h,cpp}`):**
+- `DumpBP` no longer hard-gates on `LoadObject<UBlueprint>`. It loads as `UObject` and
+  dispatches: AnimBlueprint → Blueprint → UserDefinedStruct (field list) → UserDefinedEnum
+  (enumerators, display + internal name) → Curve Float/Vector/LinearColor (exact key
+  lists) → DataTable (row struct + rows) → BehaviorTree (composites/tasks/decorators/
+  services with each node's authored properties) → BlackboardData (keys + key types) →
+  generic property-diff fallback.
+- The asset's real class is always in the header, and an unhandled type says so — the old
+  "could not load" for a perfectly loadable non-BP asset is gone.
+- ⚠ Loading a bare package path as `UObject` can return the `UPackage`; `LoadAsset` builds
+  the fully-qualified object path first and unwraps redirectors/packages.
+- Build.cs: `+AIModule` (BehaviorTree/Blackboard), `+AssetRegistry` (T3).
+
+**M2/T3 — batch dump + manifest:**
+- New `DumpBPFolder /Game/Path [-recursive] [-filter=ClassName]`. Walks the asset registry
+  (with a synchronous scan first, since plugin content is not always indexed), dispatches
+  per type, and writes one file per asset into a **mirrored** tree under
+  `Saved/BlueprintDumps/`.
+- Emits `_manifest.txt` with one row per asset found — `ASSET | TYPE | dumped -> path` or
+  `skipped (reason)` — plus a `found / dumped / skipped` summary. Row count == asset count
+  by construction, including filtered ones, so coverage is auditable rather than assumed.
+- The class filter is applied from registry metadata **before** loading.
+- Single-asset `DumpBP` still writes to `Saved/AnimBPDumps/` (unchanged, to avoid breaking
+  existing habits); the Phase 2 directory rename is therefore now half-done.
 
 ### 2026-07-19 — Class Defaults overrides section (⚠ pending machine-2 compile + re-dump verification)
 **Gap (filed same day, host-project driven):** dumps showed components and graphs but no

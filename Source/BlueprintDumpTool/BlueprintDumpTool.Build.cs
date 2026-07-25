@@ -24,6 +24,10 @@ public class BlueprintDumpTool : ModuleRules
 				"BlueprintGraph",
 				"AnimGraph",
 				"Kismet",
+				// Batch (folder) dumping walks the asset registry
+				"AssetRegistry",
+				// BehaviorTree / BlackboardData dumping
+				"AIModule",
 			}
 		);
 	}

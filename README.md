@@ -17,14 +17,24 @@ The plugin loads automatically as an editor-only module.
 In UE Editor console (Output Log or `~` key):
 
 ```
-DumpAnimBP /Game/Path/To/YourAnimBP
-DumpBP /Game/Path/To/YourBlueprint
+DumpAnimBP   /Game/Path/To/YourAnimBP
+DumpBP       /Game/Path/To/YourAsset
+DumpBPFolder /Game/Path [-recursive] [-filter=ClassName]
 ```
 
-No default path — prints usage help if called with no arguments. Works with any AnimBP or Blueprint in any project.
+No default path — prints usage help if called with no arguments. Works with any asset in any project.
 
-**Output:** `{ProjectDir}/Saved/AnimBPDumps/{Name}_Dump.txt`
-Also prints first 200 lines to the Output Log.
+`DumpBP` is not Blueprint-only: it dispatches on the loaded asset's class, so DataAssets,
+BehaviorTrees, Blackboards, Curves, DataTables and user-defined structs/enums all dump.
+Anything without a specialised dumper gets a generic property dump that names its class.
+
+`DumpBPFolder` batch-dumps a whole content path into a mirrored directory tree and writes a
+`_manifest.txt` listing every asset found as `dumped` or `skipped (reason)` — the artifact
+that makes a large decode pass auditable instead of assumed.
+
+**Output:** `{ProjectDir}/Saved/AnimBPDumps/{Name}_Dump.txt` (single asset)
+and `{ProjectDir}/Saved/BlueprintDumps/{mirrored/path}/` (batch).
+Single-asset dumps also print their first 200 lines to the Output Log.
 
 ## Example Output
 
@@ -153,10 +163,23 @@ Parent Class: ACharacter
 | **EventGraph** | Event handlers with exec chain walking |
 | **Functions** | Function signatures and exec chain bodies |
 
+### Other assets (`DumpBP` / `DumpBPFolder`)
+
+| Type | Detail |
+|------|--------|
+| **DataAsset / any UObject** | Properties that differ from class defaults, recursing into instanced sub-objects |
+| **BehaviorTree** | Composite/task tree with decorators, services, and each node's authored properties |
+| **BlackboardData** | Keys with key types and instance-sync flags |
+| **Curves** | Exact key lists (time, value, interp, tangents) for Float/Vector/LinearColor |
+| **DataTable** | Row struct plus every row's fields |
+| **User struct / enum** | Field list with types; enumerators with display + internal names |
+
 ### Expression Resolution
 
 Transition rules and exec chains resolve expressions recursively:
 - **Operators**: `Greater_FloatFloat` -> `>`, `EqualEqual_ByteByte` -> `==`, etc. (13 operators)
+- **Function calls**: recursed into their arguments — `Lerp(1.0, Clamp(SafeDivide(Speed2D, Rate), Min, Max), Alpha)`
+- **String literals**: quoted in call arguments — `GetCurveValueFromAnimation("MoveData_Speed", t)`
 - **Unary NOT**: `Not_PreBool` -> `NOT variable`
 - **Enum values**: Byte indices resolved to display names (handles BP enums with `NewEnumerator` names)
 - **Property Access**: Reads property path from node title
@@ -164,12 +187,11 @@ Transition rules and exec chains resolve expressions recursively:
 
 ## What It Doesn't Capture (Yet)
 
-- **Pure function arguments** — `Lerp()` shows no inputs (planned: Milestone 1)
-- **String literal pin values** — curve names inside function calls (planned: Milestone 1)
-- **Return node values** — `Return` with no value (planned: Milestone 1)
+- **Property Access deep paths** — shows the node-title path, not the full struct member chain
+- **Montage notify tracks** — notify class/time/duration and their own properties
 - **Node positions / layout** — text is structural, not spatial
-- **Animation asset internals** — curves, notifies inside montages/sequences
-- **Blend profiles, curve assets** — referenced by name only
+- **Animation asset internals** — curves and notifies inside montages/sequences
+- **Blend profiles** — referenced by name only
 
 See [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) for the full roadmap.
 
@@ -218,19 +240,22 @@ BlueprintDumpTool/
     |   +-- BlueprintDumpToolModule.h
     |   +-- AnimBPDumper.h
     |   +-- BlueprintDumper.h
+    |   +-- AssetDumper.h
     |   +-- BlueprintDumpUtils.h
     +-- Private/
         +-- BlueprintDumpToolModule.cpp
-        +-- AnimBPDumper.cpp            (~980 lines)
+        +-- AnimBPDumper.cpp            (~1270 lines)
         +-- BlueprintDumper.cpp
-        +-- BlueprintDumpUtils.cpp      (~1290 lines)
+        +-- AssetDumper.cpp             (~570 lines — non-BP types + batch dumping)
+        +-- BlueprintDumpUtils.cpp      (~1810 lines)
 ```
 
 ### Module Dependencies
 
 ```
 Public:  Core
-Private: CoreUObject, Engine, UnrealEd, BlueprintGraph, AnimGraph, Kismet
+Private: CoreUObject, Engine, UnrealEd, BlueprintGraph, AnimGraph, Kismet,
+         AssetRegistry (batch dumping), AIModule (BehaviorTree/Blackboard)
 ```
 
 `AnimGraphRuntime` is NOT needed — only editor-side `UAnimGraphNode_*` wrappers are used. `FPoseLinkBase` lives in the `Engine` module.

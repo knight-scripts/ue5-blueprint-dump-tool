@@ -7,6 +7,7 @@
 class UBlueprint;
 class UEdGraphNode;
 class UEdGraphPin;
+class UObject;
 struct FEdGraphPinType;
 
 /**
@@ -54,10 +55,24 @@ public:
 	/** Extract operator from node title (e.g., "Equal (Enum)" -> "=="). */
 	static FString ResolveOperatorFromTitle(const FString& Title);
 
+	/** Default depth for data-pin expression reconstruction. Function-argument recursion
+	 *  (Lerp(Clamp(SafeDivide(...)))) routinely runs 4-5 levels deep, so 4 truncated the
+	 *  exact formulas M1 exists to recover. */
+	static constexpr int32 DefaultExpressionDepth = 6;
+
 	/** Recursively build expression string walking backward from a pin.
 	 *  No visited set: valid BP data graphs are DAGs (the compiler rejects true cycles),
 	 *  so shared subexpressions are legal and MaxDepth alone bounds the walk. */
 	static FString BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxDepth = 10, int32 CurrentDepth = 0);
+
+	/** THE "what drives this pin" entry point — every walker and pin formatter routes
+	 *  through here. Three hand-copied versions of this used to short-circuit function
+	 *  calls to a bare "FuncName()", discarding the whole formula. */
+	static FString ResolvePinSourceLabel(UEdGraphPin* LinkedPin, int32 MaxDepth = DefaultExpressionDepth);
+
+	/** Literal value of an UNCONNECTED pin: enum-resolved, strings/names quoted, object
+	 *  literals by name. Empty when the pin carries no value. */
+	static FString FormatLiteralPinValue(const UEdGraphPin* Pin);
 
 	// --- Asset path normalization ---
 
@@ -85,6 +100,13 @@ public:
 	 *  Defaults panel state (incl. inherited components' knobs and BP-added
 	 *  component templates). A property not listed is at its inherited default. */
 	static void DumpClassDefaultOverrides(UBlueprint* Blueprint, FString& Output);
+
+	/** Diff an object's properties against a baseline (its archetype, or its class CDO
+	 *  when no archetype applies), RECURSING into instanced sub-objects and instanced
+	 *  content inside structs/arrays. That recursion is the whole authoring model of
+	 *  details-panel-driven plugins — without it their tuning is invisible.
+	 *  Returns the number of differing entries emitted. */
+	static int32 DumpObjectPropertyDiffs(UObject* Object, const UObject* Baseline, const FString& LinePrefix, FString& Output);
 
 	// --- Formatting ---
 

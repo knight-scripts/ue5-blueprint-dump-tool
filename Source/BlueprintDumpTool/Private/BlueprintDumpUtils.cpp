@@ -9,6 +9,8 @@
 
 #include "UObject/UnrealType.h"
 #include "UObject/PropertyPortFlags.h"
+#include "UObject/Package.h"
+#include "UObject/StructOnScope.h"
 
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -365,6 +367,53 @@ FString FBlueprintDumpUtils::ResolveOperatorFromTitle(const FString& Title)
 	return ResolveOperatorSymbol(FirstWord);
 }
 
+FString FBlueprintDumpUtils::FormatLiteralPinValue(const UEdGraphPin* Pin)
+{
+	if (!Pin)
+	{
+		return FString();
+	}
+
+	// Enums first — a raw byte index is not a value a reader can use
+	const FString EnumOrDefault = ResolveEnumPinValue(Pin);
+	if (!EnumOrDefault.IsEmpty())
+	{
+		// Quote string-likes so a curve/tag/socket name reads as DATA, not as an
+		// identifier: GetCurveValueFromAnimation("MoveData_Speed", t).
+		const FName& Category = Pin->PinType.PinCategory;
+		if (Category == UEdGraphSchema_K2::PC_String
+			|| Category == UEdGraphSchema_K2::PC_Name
+			|| Category == UEdGraphSchema_K2::PC_Text)
+		{
+			return TEXT("\"") + EnumOrDefault + TEXT("\"");
+		}
+		return EnumOrDefault;
+	}
+
+	// Object/class literals live in DefaultObject, never in DefaultValue
+	if (Pin->DefaultObject)
+	{
+		return Pin->DefaultObject->GetName();
+	}
+
+	if (!Pin->DefaultTextValue.IsEmpty())
+	{
+		return TEXT("\"") + Pin->DefaultTextValue.ToString() + TEXT("\"");
+	}
+
+	return FString();
+}
+
+FString FBlueprintDumpUtils::ResolvePinSourceLabel(UEdGraphPin* LinkedPin, int32 MaxDepth)
+{
+	if (!LinkedPin || !LinkedPin->GetOwningNode())
+	{
+		// Stale link entries exist in mildly corrupted assets
+		return TEXT("???");
+	}
+	return BuildExpressionFromPin(LinkedPin, MaxDepth);
+}
+
 FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxDepth, int32 CurrentDepth)
 {
 	if (!Pin)
@@ -490,17 +539,13 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 					}
 					else
 					{
-						// Try enum resolution first, then raw default value
-						FString Value = ResolveEnumPinValue(InputPin);
-						if (!Value.IsEmpty())
+						FString Literal = FormatLiteralPinValue(InputPin);
+						if (Literal.IsEmpty())
 						{
-							Operands.Add(Value);
+							Literal = (InputPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean)
+								? TEXT("false") : TEXT("0");
 						}
-						else
-						{
-							FString Cat = InputPin->PinType.PinCategory.ToString();
-							Operands.Add(Cat == TEXT("bool") ? TEXT("false") : TEXT("0"));
-						}
+						Operands.Add(Literal);
 					}
 				}
 			}
@@ -517,8 +562,37 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 			return OpSymbol;
 		}
 
-		// Not a recognized operator — treat as a function call
-		return FuncNameStr;
+		// Not a recognized operator — a real function call. Recurse into its inputs:
+		// returning the bare name here was THE M1 data-loss bug (Gaps 1.1/1.2/1.4).
+		// "Lerp()" becomes "Lerp(1.0, Clamp(SafeDivide(Speed2D, Rate), Min, Max), Alpha)".
+		{
+			TArray<FString> Args;
+			for (UEdGraphPin* InputPin : Node->Pins)
+			{
+				if (InputPin->Direction != EGPD_Input) continue;
+				if (InputPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec) continue;
+				if (InputPin->PinName == TEXT("self")) continue; // target object — noise
+
+				if (InputPin->LinkedTo.Num() > 0 && InputPin->LinkedTo[0])
+				{
+					Args.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1));
+				}
+				else
+				{
+					FString Literal = FormatLiteralPinValue(InputPin);
+					Args.Add(Literal.IsEmpty() ? TEXT("?") : Literal);
+				}
+			}
+
+			// Unset TRAILING optional params are noise; a gap in the middle is a real
+			// unknown and stays "?" so argument positions keep their meaning.
+			while (Args.Num() > 0 && Args.Last() == TEXT("?"))
+			{
+				Args.Pop();
+			}
+
+			return FString::Printf(TEXT("%s(%s)"), *FuncNameStr, *FString::Join(Args, TEXT(", ")));
+		}
 	}
 
 	// Generic fallback — try to extract expression from input pins
@@ -537,10 +611,10 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 			}
 			else
 			{
-				FString Value = ResolveEnumPinValue(InputPin);
-				if (!Value.IsEmpty())
+				FString Literal = FormatLiteralPinValue(InputPin);
+				if (!Literal.IsEmpty())
 				{
-					Operands.Add(Value);
+					Operands.Add(Literal);
 				}
 			}
 		}
@@ -641,30 +715,7 @@ FString FBlueprintDumpUtils::GetDataInputSummary(UEdGraphNode* Node)
 
 		if (Pin->LinkedTo.Num() > 0)
 		{
-			// Connected — show source (element null-guarded: stale link entries exist in corrupt assets)
-			UEdGraphPin* LinkedPin = Pin->LinkedTo[0];
-			UEdGraphNode* SourceNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
-			FString SourceLabel;
-
-			if (!SourceNode)
-			{
-				SourceLabel = TEXT("???");
-			}
-			else if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(SourceNode))
-			{
-				SourceLabel = VarGet->GetVarName().ToString();
-			}
-			else if (UK2Node_CallFunction* FuncCall = Cast<UK2Node_CallFunction>(SourceNode))
-			{
-				SourceLabel = FuncCall->FunctionReference.GetMemberName().ToString() + TEXT("()");
-			}
-			else
-			{
-				// Gap 1: Recursive resolution for pure nodes (operators, struct breaks, selects, etc.)
-				SourceLabel = BuildExpressionFromPin(LinkedPin, /*MaxDepth=*/4);
-			}
-
-			Parts.Add(FString::Printf(TEXT("%s=%s"), *PinName, *SourceLabel));
+			Parts.Add(FString::Printf(TEXT("%s=%s"), *PinName, *ResolvePinSourceLabel(Pin->LinkedTo[0])));
 		}
 		else if (!Pin->DefaultValue.IsEmpty() && Pin->DefaultValue != Pin->AutogeneratedDefaultValue)
 		{
@@ -753,31 +804,15 @@ void FBlueprintDumpUtils::WalkExecChain(UEdGraphNode* Node, int32 Depth, FString
 			{
 				if (Pin->LinkedTo.Num() > 0)
 				{
-					UEdGraphPin* LinkedPin = Pin->LinkedTo[0];
-					UEdGraphNode* SourceNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
-					FString SourceLabel;
-					if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(SourceNode))
-					{
-						SourceLabel = VarGet->GetVarName().ToString();
-					}
-					else if (UK2Node_CallFunction* FuncCall = Cast<UK2Node_CallFunction>(SourceNode))
-					{
-						SourceLabel = FuncCall->FunctionReference.GetMemberName().ToString() + TEXT("()");
-					}
-					else if (SourceNode)
-					{
-						SourceLabel = SourceNode->GetNodeTitle(ENodeTitleType::ListView).ToString();
-						SourceLabel.ReplaceInline(TEXT("\n"), TEXT(" "));
-					}
-					else
-					{
-						SourceLabel = TEXT("???");
-					}
-					Label += TEXT(" = ") + SourceLabel;
+					Label += TEXT(" = ") + ResolvePinSourceLabel(Pin->LinkedTo[0]);
 				}
-				else if (!Pin->DefaultValue.IsEmpty())
+				else
 				{
-					Label += TEXT(" = ") + ResolveEnumPinValue(Pin);
+					const FString Literal = FormatLiteralPinValue(Pin);
+					if (!Literal.IsEmpty())
+					{
+						Label += TEXT(" = ") + Literal;
+					}
 				}
 				break;
 			}
@@ -1320,30 +1355,67 @@ void FBlueprintDumpUtils::DumpComponentTree(UBlueprint* Blueprint, FString& Outp
 // state is visible in the dump. A property NOT listed is running its inherited
 // (usually C++) default; the section header always prints so absence of a knob
 // line is meaningful evidence, not a tool-version ambiguity.
+//
+// The diff walker below works on VALUE pointers rather than UObject containers so
+// it can descend through structs and arrays into instanced sub-objects. That
+// descent is the point: a plugin that authors its behaviour as EditInlineNew
+// objects in the details panel keeps every tuned number down there, and a walker
+// that stops at the pointer reports the asset as empty.
 
 namespace
 {
-	// Diffs of these are noise: transient state, deprecated members, and
-	// instanced-object references (subobject POINTERS always differ between a
-	// BP CDO and its parent CDO; subobject CONTENT is diffed separately).
+	// Transient/deprecated members are noise. Instanced references are deliberately
+	// NOT skipped: their POINTERS always differ (the reason they were once filtered
+	// out wholesale), but their CONTENT is exactly where details-panel authoring puts
+	// the data — an EditInlineNew plugin keeps 100% of its tuning there, so filtering
+	// the pointer must not mean discarding the object.
 	constexpr uint64 SkipDiffPropertyFlags =
 		CPF_Transient | CPF_DuplicateTransient | CPF_NonPIEDuplicateTransient |
-		CPF_Deprecated | CPF_InstancedReference | CPF_PersistentInstance |
-		CPF_ContainsInstancedReference;
+		CPF_Deprecated;
 
-	FString ExportPropertyValue(const FProperty* Prop, int32 ArrayIndex, UObject* Container)
+	// Instanced graphs can nest (attack -> traits -> impacts); bound the descent.
+	constexpr int32 MaxInstancedDepth = 4;
+
+	/** Shared state for one diff run: cycle guard + current instanced nesting depth. */
+	struct FDiffContext
 	{
-		// HARD object references: print the asset path, not ExportText's verbose
-		// form. Soft/weak refs stay on the generic path — they resolve to null
-		// when unloaded, which would alias two different soft paths.
+		TSet<const UObject*> Visited;
+		int32 Depth = 0;
+	};
+
+	int32 AppendPropertyDiffs(UStruct* Scope, const void* Container, const void* Baseline,
+		UObject* ExportOwner, const FString& LinePrefix, FDiffContext& Ctx, FString& Output);
+
+	/** Object properties whose value is owned INLINE by the container — the details-panel
+	 *  "EditInlineNew / Instanced" authoring model. These get recursed into, not compared. */
+	const FObjectProperty* AsInstancedObjectProperty(const FProperty* Prop)
+	{
+		const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop);
+		if (!ObjProp || !ObjProp->PropertyClass)
+		{
+			return nullptr;
+		}
+		if (Prop->HasAnyPropertyFlags(CPF_InstancedReference | CPF_PersistentInstance)
+			|| ObjProp->PropertyClass->HasAnyClassFlags(CLASS_EditInlineNew))
+		{
+			return ObjProp;
+		}
+		return nullptr;
+	}
+
+	FString ExportValue(const FProperty* Prop, const void* ValuePtr, UObject* ExportOwner)
+	{
+		// HARD object references: print the asset path, not ExportText's verbose form.
+		// Soft/weak refs stay on the generic path — they resolve to null when unloaded,
+		// which would alias two different soft paths.
 		if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
 		{
-			UObject* Value = ObjProp->GetObjectPropertyValue_InContainer(Container, ArrayIndex);
+			UObject* Value = ObjProp->GetObjectPropertyValue(ValuePtr);
 			return Value ? Value->GetPathName() : TEXT("None");
 		}
 
 		FString ValueStr;
-		Prop->ExportText_InContainer(ArrayIndex, ValueStr, Container, nullptr, Container, PPF_None);
+		Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, ExportOwner, PPF_None);
 		if (ValueStr.IsEmpty())
 		{
 			ValueStr = TEXT("(empty)");
@@ -1355,35 +1427,150 @@ namespace
 		return ValueStr;
 	}
 
-	bool PropertyElementIdentical(const FProperty* Prop, int32 ArrayIndex, UObject* Object, UObject* Archetype)
+	bool ValuesIdentical(const FProperty* Prop, const void* A, const void* B)
 	{
-		// HARD object references: pointer equality, EXCEPT subobjects of the
-		// compared pair — those can never be pointer-equal, so match by
-		// name + class. Soft/weak refs use the generic path (path comparison).
 		if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
 		{
-			UObject* A = ObjProp->GetObjectPropertyValue_InContainer(Object, ArrayIndex);
-			UObject* B = ObjProp->GetObjectPropertyValue_InContainer(Archetype, ArrayIndex);
-			if (A == B)
+			UObject* ObjA = ObjProp->GetObjectPropertyValue(A);
+			UObject* ObjB = ObjProp->GetObjectPropertyValue(B);
+			if (ObjA == ObjB)
 			{
 				return true;
 			}
-			if (A && B && (A->IsIn(Object) || B->IsIn(Archetype)))
+			if (!ObjA || !ObjB)
 			{
-				return A->GetFName() == B->GetFName() && A->GetClass() == B->GetClass();
+				return false;
 			}
-			return false;
+			// Sub-objects of the two compared containers can never be pointer-equal;
+			// match those by name + class. Everything else is an asset reference —
+			// compare paths so two distinct assets never alias.
+			const bool bSubA = ObjA->GetOuter() && !ObjA->GetOuter()->IsA<UPackage>();
+			const bool bSubB = ObjB->GetOuter() && !ObjB->GetOuter()->IsA<UPackage>();
+			if (bSubA && bSubB)
+			{
+				return ObjA->GetFName() == ObjB->GetFName() && ObjA->GetClass() == ObjB->GetClass();
+			}
+			return ObjA->GetPathName() == ObjB->GetPathName();
 		}
-		return Prop->Identical_InContainer(Object, Archetype, ArrayIndex, PPF_None);
+		return Prop->Identical(A, B, PPF_None);
 	}
 
-	// Diff Object vs Archetype over PropertyScope's properties (incl. supers).
-	// PropertyScope must be a class both objects derive from (or their shared
-	// class) so property offsets are valid in both containers.
-	int32 AppendPropertyDiffs(UStruct* PropertyScope, UObject* Object, UObject* Archetype, const TCHAR* LinePrefix, FString& Output)
+	/** Recurse into one instanced sub-object's contents. */
+	int32 AppendInstancedObject(const FString& Label, UObject* Value, UObject* BaselineValue,
+		const FString& LinePrefix, FDiffContext& Ctx, FString& Output)
 	{
+		if (!Value)
+		{
+			// Clearing a slot that shipped with a value IS an authoring act
+			if (BaselineValue)
+			{
+				Output += FString::Printf(TEXT("%s%s = None  (default: %s)\n"),
+					*LinePrefix, *Label, *BaselineValue->GetClass()->GetName());
+				return 1;
+			}
+			return 0;
+		}
+
+		// An object outered directly to a package is a standalone ASSET — a reference,
+		// not inline content. Some referenced classes are EditInlineNew, so without this
+		// guard a plain asset pointer would splice another asset's guts into this dump.
+		if (Value->GetOuter() && Value->GetOuter()->IsA<UPackage>())
+		{
+			if (BaselineValue == Value)
+			{
+				return 0;
+			}
+			Output += FString::Printf(TEXT("%s%s = %s  (default: %s)\n"),
+				*LinePrefix, *Label, *Value->GetPathName(),
+				BaselineValue ? *BaselineValue->GetPathName() : TEXT("None"));
+			return 1;
+		}
+
+		// Components are enumerated by the dedicated subobject/SCS passes; recursing
+		// here would print every component twice.
+		if (Value->IsA(UActorComponent::StaticClass()))
+		{
+			return 0;
+		}
+
+		if (Ctx.Depth >= MaxInstancedDepth)
+		{
+			Output += FString::Printf(TEXT("%s%s = %s  (depth limit — not expanded)\n"),
+				*LinePrefix, *Label, *Value->GetClass()->GetName());
+			return 1;
+		}
+		if (Ctx.Visited.Contains(Value))
+		{
+			Output += FString::Printf(TEXT("%s%s = %s  (already shown above)\n"),
+				*LinePrefix, *Label, *Value->GetClass()->GetName());
+			return 1;
+		}
+		Ctx.Visited.Add(Value);
+
+		// Baseline: the archetype counterpart when it is the SAME class, otherwise the
+		// value's own class CDO. That second case is the details-panel "author picked a
+		// subclass" case — which the previous code skipped outright as "diff undefined",
+		// discarding exactly the objects worth reading.
+		const UObject* Baseline = (BaselineValue && BaselineValue->GetClass() == Value->GetClass())
+			? BaselineValue
+			: Value->GetClass()->GetDefaultObject();
+
+		FString Body;
+		++Ctx.Depth;
+		const int32 Inner = AppendPropertyDiffs(Value->GetClass(), Value, Baseline, Value,
+			LinePrefix + TEXT("  "), Ctx, Body);
+		--Ctx.Depth;
+
+		Output += FString::Printf(TEXT("%s%s = %s\n"), *LinePrefix, *Label, *Value->GetClass()->GetName());
+		Output += Inner > 0 ? Body : (LinePrefix + TEXT("    (no property differences)\n"));
+		return Inner + 1;
+	}
+
+	/** One array element that carries instanced content (object or struct-wrapping-object). */
+	int32 AppendInstancedElement(const FProperty* ElemProp, const FString& Label,
+		const void* ValuePtr, const void* BaselinePtr, UObject* ExportOwner,
+		const FString& LinePrefix, FDiffContext& Ctx, FString& Output)
+	{
+		if (const FObjectProperty* ObjProp = AsInstancedObjectProperty(ElemProp))
+		{
+			UObject* Value = ObjProp->GetObjectPropertyValue(ValuePtr);
+			UObject* BaselineValue = BaselinePtr ? ObjProp->GetObjectPropertyValue(BaselinePtr) : nullptr;
+			return AppendInstancedObject(Label, Value, BaselineValue, LinePrefix, Ctx, Output);
+		}
+
+		if (const FStructProperty* StructProp = CastField<FStructProperty>(ElemProp))
+		{
+			// No archetype counterpart (array grew): compare against a default-constructed
+			// instance, so "what did the author set" stays answerable for new elements.
+			FStructOnScope DefaultStruct(StructProp->Struct);
+			const void* Baseline = BaselinePtr ? BaselinePtr : DefaultStruct.GetStructMemory();
+
+			FString Body;
+			const int32 Inner = AppendPropertyDiffs(StructProp->Struct, ValuePtr, Baseline, ExportOwner,
+				LinePrefix + TEXT("  "), Ctx, Body);
+			if (Inner > 0)
+			{
+				Output += FString::Printf(TEXT("%s%s (%s)\n"), *LinePrefix, *Label, *StructProp->Struct->GetName());
+				Output += Body;
+			}
+			return Inner;
+		}
+
+		return 0;
+	}
+
+	// Diff Container vs Baseline over Scope's properties (incl. supers). Scope must be a
+	// struct/class whose layout is valid in BOTH containers.
+	int32 AppendPropertyDiffs(UStruct* Scope, const void* Container, const void* Baseline,
+		UObject* ExportOwner, const FString& LinePrefix, FDiffContext& Ctx, FString& Output)
+	{
+		if (!Scope || !Container)
+		{
+			return 0;
+		}
+
 		int32 DiffCount = 0;
-		for (TFieldIterator<FProperty> It(PropertyScope); It; ++It)
+		for (TFieldIterator<FProperty> It(Scope); It; ++It)
 		{
 			const FProperty* Prop = *It;
 			if (Prop->HasAnyPropertyFlags(SkipDiffPropertyFlags))
@@ -1393,51 +1580,151 @@ namespace
 
 			for (int32 ArrayIndex = 0; ArrayIndex < Prop->ArrayDim; ++ArrayIndex)
 			{
-				if (PropertyElementIdentical(Prop, ArrayIndex, Object, Archetype))
-				{
-					continue;
-				}
+				const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Container, ArrayIndex);
+				const void* BasePtr = Baseline
+					? Prop->ContainerPtrToValuePtr<void>(Baseline, ArrayIndex)
+					: nullptr;
 
-				FString Name = Prop->GetName();
+				// Authored name, not the raw one: BP-struct fields carry a GUID suffix
+				// internally (Damage_5_A1B2...) that no reader should have to decode.
+				FString Name = Scope->GetAuthoredNameForField(Prop);
 				if (Prop->ArrayDim > 1)
 				{
 					Name += FString::Printf(TEXT("[%d]"), ArrayIndex);
 				}
 
+				// (1) Instanced object — recurse into its contents
+				if (AsInstancedObjectProperty(Prop))
+				{
+					DiffCount += AppendInstancedElement(Prop, Name, ValuePtr, BasePtr,
+						ExportOwner, LinePrefix, Ctx, Output);
+					continue;
+				}
+
+				// (2) Array whose elements carry instanced content
+				if (const FArrayProperty* ArrayProp = CastField<FArrayProperty>(Prop))
+				{
+					const FProperty* Inner = ArrayProp->Inner;
+					const bool bInnerInstanced = AsInstancedObjectProperty(Inner) != nullptr
+						|| Inner->HasAnyPropertyFlags(CPF_ContainsInstancedReference);
+
+					if (bInnerInstanced)
+					{
+						FScriptArrayHelper Helper(ArrayProp, ValuePtr);
+						TUniquePtr<FScriptArrayHelper> BaseHelper;
+						if (BasePtr)
+						{
+							BaseHelper = MakeUnique<FScriptArrayHelper>(ArrayProp, BasePtr);
+						}
+
+						const int32 BaseNum = BaseHelper ? BaseHelper->Num() : 0;
+						if (Helper.Num() != BaseNum)
+						{
+							Output += FString::Printf(TEXT("%s%s: %d element(s)  (default: %d)\n"),
+								*LinePrefix, *Name, Helper.Num(), BaseNum);
+							++DiffCount;
+						}
+
+						for (int32 i = 0; i < Helper.Num(); ++i)
+						{
+							const void* BaseElem = (BaseHelper && i < BaseHelper->Num())
+								? BaseHelper->GetRawPtr(i) : nullptr;
+							DiffCount += AppendInstancedElement(Inner,
+								FString::Printf(TEXT("%s[%d]"), *Name, i),
+								Helper.GetRawPtr(i), BaseElem, ExportOwner, LinePrefix, Ctx, Output);
+						}
+						continue;
+					}
+				}
+
+				// (3) Struct wrapping instanced content (e.g. an FInstanced*Properties
+				//     struct holding one EditInlineNew object) — descend into its fields
+				if (const FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+				{
+					if (Prop->HasAnyPropertyFlags(CPF_ContainsInstancedReference))
+					{
+						FString Body;
+						const int32 Inner = AppendPropertyDiffs(StructProp->Struct, ValuePtr, BasePtr,
+							ExportOwner, LinePrefix + TEXT("  "), Ctx, Body);
+						if (Inner > 0)
+						{
+							Output += FString::Printf(TEXT("%s%s (%s)\n"),
+								*LinePrefix, *Name, *StructProp->Struct->GetName());
+							Output += Body;
+							DiffCount += Inner;
+						}
+						continue;
+					}
+				}
+
+				// (4) Plain value — diff it
+				if (BasePtr && ValuesIdentical(Prop, ValuePtr, BasePtr))
+				{
+					continue;
+				}
+
 				Output += FString::Printf(TEXT("%s%s = %s  (default: %s)\n"),
-					LinePrefix, *Name,
-					*ExportPropertyValue(Prop, ArrayIndex, Object),
-					*ExportPropertyValue(Prop, ArrayIndex, Archetype));
+					*LinePrefix, *Name,
+					*ExportValue(Prop, ValuePtr, ExportOwner),
+					BasePtr ? *ExportValue(Prop, BasePtr, ExportOwner) : TEXT("n/a"));
 				++DiffCount;
 			}
 		}
 		return DiffCount;
 	}
 
-	// Diff one subobject/template against its archetype; emit a bracketed
-	// sub-heading only when something actually differs.
+	// Diff one subobject/template against its baseline; emit a bracketed sub-heading
+	// only when something actually differs.
 	int32 AppendSubobjectDiffs(UObject* Sub, const FString& DisplayName, const TCHAR* Suffix, FString& Output)
 	{
 		if (!Sub)
 		{
 			return 0;
 		}
-		UObject* Archetype = Sub->GetArchetype();
-		if (!Archetype || Archetype == Sub || Archetype->GetClass() != Sub->GetClass())
+
+		UObject* Baseline = Sub->GetArchetype();
+		const TCHAR* BaselineNote = TEXT("");
+		if (!Baseline || Baseline == Sub || Baseline->GetClass() != Sub->GetClass())
 		{
-			// No archetype or class-overridden subobject — field diff undefined.
+			// Class-overridden (or archetype-less) subobject: the honest baseline is the
+			// sub's OWN class CDO. Skipping these was the "field diff undefined" hole.
+			Baseline = Sub->GetClass()->GetDefaultObject();
+			BaselineNote = TEXT(", vs class defaults");
+		}
+		if (!Baseline || Baseline == Sub)
+		{
 			return 0;
 		}
 
+		FDiffContext Ctx;
+		Ctx.Visited.Add(Sub);
+
 		FString Section;
-		const int32 DiffCount = AppendPropertyDiffs(Sub->GetClass(), Sub, Archetype, TEXT("    "), Section);
+		const int32 DiffCount = AppendPropertyDiffs(Sub->GetClass(), Sub, Baseline, Sub,
+			TEXT("    "), Ctx, Section);
 		if (DiffCount > 0)
 		{
-			Output += FString::Printf(TEXT("  [%s (%s)%s]\n"), *DisplayName, *Sub->GetClass()->GetName(), Suffix);
+			Output += FString::Printf(TEXT("  [%s (%s)%s%s]\n"),
+				*DisplayName, *Sub->GetClass()->GetName(), Suffix, BaselineNote);
 			Output += Section;
 		}
 		return DiffCount;
 	}
+}
+
+int32 FBlueprintDumpUtils::DumpObjectPropertyDiffs(UObject* Object, const UObject* Baseline,
+	const FString& LinePrefix, FString& Output)
+{
+	if (!Object)
+	{
+		return 0;
+	}
+
+	const UObject* Base = Baseline ? Baseline : Object->GetClass()->GetDefaultObject();
+
+	FDiffContext Ctx;
+	Ctx.Visited.Add(Object);
+	return AppendPropertyDiffs(Object->GetClass(), Object, Base, Object, LinePrefix, Ctx, Output);
 }
 
 void FBlueprintDumpUtils::DumpClassDefaultOverrides(UBlueprint* Blueprint, FString& Output)
@@ -1464,7 +1751,9 @@ void FBlueprintDumpUtils::DumpClassDefaultOverrides(UBlueprint* Blueprint, FStri
 
 	// 1) The CDO itself, over INHERITED properties only (parent-class scope:
 	//    BP-added variables are already covered by the Variables section).
-	int32 TotalDiffs = AppendPropertyDiffs(ParentClass, CDO, ParentCDO, TEXT("  "), Output);
+	FDiffContext Ctx;
+	Ctx.Visited.Add(CDO);
+	int32 TotalDiffs = AppendPropertyDiffs(ParentClass, CDO, ParentCDO, CDO, TEXT("  "), Ctx, Output);
 
 	// 2) Default subobjects (C++-created components) vs their archetypes on the
 	//    parent CDO — where Class-Defaults edits to inherited components live.

@@ -14,4 +14,5 @@ public:
 private:
 	IConsoleObject* DumpAnimBPCommand = nullptr;
 	IConsoleObject* DumpBPCommand = nullptr;
+	IConsoleObject* DumpBPFolderCommand = nullptr;
 };

@@ -2,6 +2,7 @@
 
 #include "BlueprintDumper.h"
 #include "BlueprintDumpUtils.h"
+#include "AssetDumper.h"
 
 #include "Engine/Blueprint.h"
 
@@ -18,10 +19,14 @@ void FBlueprintDumper::ExecuteCommand(const TArray<FString>& Args)
 	if (Args.Num() < 1)
 	{
 		UE_LOG(LogTemp, Display, TEXT(""));
-		UE_LOG(LogTemp, Display, TEXT("Usage: DumpBP /Game/Path/To/Blueprint"));
+		UE_LOG(LogTemp, Display, TEXT("Usage: DumpBP /Game/Path/To/Asset"));
 		UE_LOG(LogTemp, Display, TEXT(""));
-		UE_LOG(LogTemp, Display, TEXT("  Dumps Blueprint structure to Saved/AnimBPDumps/{Name}_Dump.txt"));
+		UE_LOG(LogTemp, Display, TEXT("  Dumps asset structure to Saved/AnimBPDumps/{Name}_Dump.txt"));
+		UE_LOG(LogTemp, Display, TEXT("  Handles Blueprints, DataAssets, BehaviorTrees, Blackboards,"));
+		UE_LOG(LogTemp, Display, TEXT("  Curves, DataTables, user structs/enums; anything else gets a"));
+		UE_LOG(LogTemp, Display, TEXT("  generic property dump naming its class."));
 		UE_LOG(LogTemp, Display, TEXT("  Example: DumpBP /Game/Characters/BP_MyCharacter"));
+		UE_LOG(LogTemp, Display, TEXT("  Batch:   DumpBPFolder /Game/Path -recursive"));
 		UE_LOG(LogTemp, Display, TEXT(""));
 		return;
 	}
@@ -70,17 +75,23 @@ void FBlueprintDumper::ExecuteCommand(const TArray<FString>& Args)
 
 FString FBlueprintDumper::DumpBlueprint(const FString& AssetPath)
 {
-	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
-	if (!Blueprint)
+	UObject* Asset = FAssetDumper::LoadAsset(AssetPath);
+	if (!Asset)
 	{
-		// Try with object name appended
-		FString AltPath = AssetPath + TEXT(".") + FPaths::GetBaseFilename(AssetPath);
-		Blueprint = LoadObject<UBlueprint>(nullptr, *AltPath);
+		UE_LOG(LogTemp, Error, TEXT("DumpBP: no asset found at '%s'"), *AssetPath);
+		return FString();
 	}
 
+	// Not a Blueprint? Say what it actually IS and dump it anyway — the old code
+	// reported "could not load" for an asset that loaded perfectly well, which read
+	// as "missing" when it meant "unhandled type".
+	return FAssetDumper::DumpLoadedAsset(Asset);
+}
+
+FString FBlueprintDumper::DumpBlueprintObject(UBlueprint* Blueprint)
+{
 	if (!Blueprint)
 	{
-		UE_LOG(LogTemp, Error, TEXT("DumpBP: Could not load Blueprint at '%s'"), *AssetPath);
 		return FString();
 	}
 

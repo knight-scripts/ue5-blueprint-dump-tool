@@ -26,6 +26,9 @@ public:
 	/** Main orchestrator. Returns the full dump as a string. */
 	static FString DumpAnimBP(const FString& AssetPath);
 
+	/** Same, on an already-loaded asset (batch dumping loads once and dispatches). */
+	static FString DumpAnimBPObject(UAnimBlueprint* AnimBP);
+
 private:
 	/** Recursive backward walk through pose link pins from a given node.
 	 *  NodeBudget bounds total nodes per walk (insurance against pathological graphs). */
