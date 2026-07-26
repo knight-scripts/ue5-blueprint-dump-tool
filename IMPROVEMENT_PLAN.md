@@ -723,20 +723,21 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
    notify tracks) is the remaining item** and is what makes "how long is the deflect
    window" answerable.
 
-### Next session (2026-07-26 exit state — TCF-READY, proven at 3083 assets)
+### Next session (2026-07-26 exit state — M1 + M2 CLOSED, nothing uncompiled)
 
-M1 core, T1, T2, T3, N1 and N2 are all machine-2 verified. Only the GUID-suffix fix
-(4th round) is uncompiled. Remaining work, in value order:
+Everything in M1 core and M2 (T1/T2/T3, N1/N2, and the 6th-round F-1…F-5) is verified on
+machine 2 across three unrelated projects totalling 10,688 assets. No pending compile.
 
-1. **Verify the 5th round** (encoding + last GUID cases) — known-answers in its changelog
-   entry. The encoding one is a one-liner: `head -c2` on any dump must NOT be `fffe`.
-2. **T4 — montage notify tracks.** The last blocker for combat-timing decode.
-3. Gap 1.5 (Property Access reflection) → `Not Equal (Enum)` → 1.3b/1.4b → rest of Phase 2.
+Remaining, in value order:
 
-**The TCF pass is unblocked and de-risked** — /Game recursive on GASP is a bigger, more
-varied run than TCF's 319 assets. TCF still needs mounting first: it is a source-only copy
-on machine 1, so it wants either an engine-level install or a throwaway project with TCF +
-this plugin enabled.
+1. **T4 — montage notify tracks.** The only milestone item left, and the one that answers
+   "how long is the deflect window" from TCF's montages.
+2. Gap 1.5 (Property Access reflection) → `FText` localisation GUIDs → `Not Equal (Enum)`
+   → 1.3b/1.4b → rest of Phase 2. All polish; none blocks a decode.
+
+**The tool is done as a decode instrument for anything already dumpable.** Scale is proven
+(7287-asset project, 3509-char worst line, zero guard pathologies) and TCF's 318 assets are
+in text. The next real work is reading those dumps, not improving the reader.
 
 **The TCF pass itself is unblocked** — but note TCF is not mounted in the host project
 (source-only copy on machine 1). It needs the plugin installed to the engine, or a
@@ -777,6 +778,40 @@ missing data flow.
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-26 (7th round) — ✅ ALL SIX FIXES VERIFIED. M1 + M2 (less T4) CLOSED.
+
+Re-verified on GASP (3083) + AGLS (7287) + TCF (318):
+
+| Known-answer | Before | After |
+|---|---|---|
+| F-1 GUID group, anywhere | 11 | **0** (Chooser lines cleaned too) |
+| F-2a VariableSet as data source | 70 | **0** real (10 hits are legitimate `Set members in …` / `Set Defense Impact Values(…)` names — my metric's false positives) |
+| F-2b macro re-expansion | 1449 | **0** real (7 hits are all `For Each Loop(...)` — the elision marker, not re-expansion) |
+| F-3 longest line (AGLS) | 11,052 ch | **3,509 ch** (−68%); lines >2000: 79 → 11 |
+| F-4 BT structural noise | every node | **0** |
+| F-5 bare `TArray` | 19 structs | **0** — `Damage To Apply : TArray<FS_DamageToApply>` |
+| Encoding | 87% UTF-16 | **0 of 10,688** |
+
+3790 elision markers are in active use across the three projects — the memo is what holds
+the line length down. The residual AGLS length is genuine expression complexity in ALSv4's
+climbing math (`CollapseGraph_0(Make ALS Component and Transform(…))`), not a defect.
+
+**The BT now reads as a decode artifact should:**
+```
+Selector (BTComposite_Selector)
+  [child 0]
+    Decorator: BTD_CheckStates (BTD_CheckStates_C)
+      AI State Tag = (GameplayTags=(("State.ReturnToPost"),("State.Go To Location"),…))
+      FlowAbortMode = Self  (default: None)
+    Sequence (BTComposite_Sequence)
+      [child 0]
+        Task: Move To (BTTask_MoveTo)
+          BlackboardKey = (SelectedKeyName="Destination")
+```
+
+**Status: M1 core and M2 T1/T2/T3 are CLOSED and verified at 10,688 assets across three
+unrelated projects.** T4 (montage notify tracks) is the only milestone item left.
 
 ### 2026-07-26 (6th round) — the four-project stress test: 2 fixes verified, 6 defects found
 
