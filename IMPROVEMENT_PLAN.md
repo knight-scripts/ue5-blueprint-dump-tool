@@ -699,6 +699,13 @@ also keeps the blast radius small and makes the regression diff readable.
   Print `["<key>"]` then recurse the value.
 - **`FSetProperty`** — elements, no baseline pairing (report added/removed).
 
+### M3-2b — nested enums come along for free (evidence, 12th round)
+
+56 of the 122 surviving `NewEnumerator` occurrences are enums *inside* flat-exported
+Chooser structs. Routing every leaf through `ExportValue` — which already resolves enums
+per D-1 — fixes them as a side effect. Flat export loses enum resolution as well as data,
+so M3 closes both.
+
 ### M3-3 — reuse the existing guards
 
 `FDiffContext` already carries the depth cap and cycle guard; container recursion counts
@@ -863,6 +870,50 @@ missing data flow.
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-26 (12th round) — ✅ 10th + 11th VERIFIED. Tool complete except M3.
+
+Verified on TCF Samurai (364) + GASP (3083) + ALS-Refactored (341) + Summoning (208).
+
+**D-3 exact.** `Assets found: 570   dumped: 341   skipped: 229`, all 229 rows carrying
+`skipped (external actor package; -external to include)`, manifest rows still summing to
+**570**, **0** external dumps on disk, and the policy stated in the manifest header.
+
+**Enum resolution works.** `Swing Direction = Downward  (default: Right)` — was
+`NewEnumerator13 (default: NewEnumerator3)`.
+
+⭐ **The damage map is complete and untruncated** — the thing the 1000-char cap was raised
+for:
+```
+Impact.Result.Block -> Attribute.Posture 10.0
+Impact.Result.Hit   -> Attribute.Health  10.0 + Attribute.Posture 5.0
+```
+That is a full attack damage spec in text, both results, per attack.
+
+**Full health check across 3976 dumps / 4 projects — every defect class at zero:**
+UTF-16 0 · `(cycle)` 0 · `(unresolved)` 0 · `(depth limit)` 0 · node-budget 0 · `((none))` 0
+· GUID group 0 · F-2b macro re-expansion 0 · F-5 bare `TArray` 0 · F-6 section leak 0 ·
+max line **2072 chars**.
+
+#### The residue is 100% accounted for, and it is all M3
+
+122 `NewEnumerator` remain. Every one is explained:
+- **66 are deliberate** — the UserDefinedEnum dumper's `2 = Aim  (NewEnumerator2)` lines.
+  That is the **decoder key**: it maps the internal names that appear inside other dumps
+  back to authored labels. Keep.
+- **56 sit inside flat Chooser export text** — `ValueName="E_MovementMode::NewEnumerator4"`
+  in `CHT_*` `ColumnsStructs`. The per-property enum resolver cannot reach an enum nested
+  inside a struct that is exported as one string.
+
+Truncations: 2979 -> **1405** at the 1000-char cap.
+
+⇒ **Both residues are the same defect, and it is D-2.** Flat container export does not just
+clip data, it also loses enum resolution inside whatever it flattens. That is now
+*evidence* for M3 rather than an argument for it, and M3's spec should note that structural
+recursion fixes the nested-enum case for free by routing every leaf through `ExportValue`.
+
+**Status: M1, M2 and every filed defect (F-1…F-6, N1, N2, D-1, D-3) are closed and verified
+across five unrelated projects totalling ~11,900 assets. M3 is the only open item.**
 
 ### 2026-07-26 (11th round) — ALS-Refactored as a 5th test project; D-3 external actors
 
