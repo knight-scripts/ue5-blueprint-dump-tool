@@ -660,6 +660,87 @@ fabricate zeros (`GreaterGreater_VectorRotator(…, 0, 0, 0, 0.0, 0.0, …)`).
 `MovementMode == InAir`), so no rule mixing `&&`/`||` has ever been dumped. Same note as
 2026-07-06 — it needs an authored test rule, or TCF content, to validate.
 
+## Milestone 3 — D-2 done properly: structural container recursion
+
+> **Why this is a real item and not a nit.** The 1000-char cap shipped in the 10th round is
+> a mitigation. Flat `ExportTextItem_Direct` output is *lossy by construction* for nested
+> containers: the value that gets clipped is always the one with the most structure, i.e.
+> the one worth reading. TCF's `Damage Applications Per Impact Result` — the map that holds
+> every attack's posture/health numbers per impact result — is exactly this shape. A bigger
+> cap postpones the problem; it does not change that a TMap of structs is being rendered as
+> one line of engine text.
+
+### The move
+
+The same one T1 made for instanced objects: stop exporting, start walking.
+`AppendPropertyDiffs` already recurses instanced objects, arrays of them, and structs that
+*contain* them. Extend that walker to containers generally.
+
+### M3-1 — recurse only when it pays (the design decision)
+
+Do **not** recurse every struct: `(X=1.0,Y=2.0,Z=3.0)` is more readable on one line than as
+three, and unconditional recursion would bloat every dump we just spent six rounds shrinking.
+
+**Rule: export flat first; recurse only if the flat text exceeds a threshold** (start at
+**120 chars**, tune on evidence). Short values keep today's output byte-for-byte — which
+also keeps the blast radius small and makes the regression diff readable.
+
+### M3-2 — per-container handling
+
+- **`FStructProperty`** — recurse fields with the baseline's matching field. Already exists
+  for the instanced case; drop the `CPF_ContainsInstancedReference` condition and gate on
+  length instead.
+- **`FArrayProperty`** — per element; baseline element `i`, or a default-constructed
+  instance when the baseline array is shorter (the `FStructOnScope` pattern
+  `AppendInstancedElement` already uses).
+- **`FMapProperty`** — ⚠ **match by KEY, not index.** This is the one that matters: TCF's
+  damage map is keyed by GameplayTag, and index-matching would diff `Impact.Result.Block`
+  against `Impact.Result.Hit` and report nonsense. `FScriptMapHelper::FindMapIndexWithKey`.
+  Print `["<key>"]` then recurse the value.
+- **`FSetProperty`** — elements, no baseline pairing (report added/removed).
+
+### M3-3 — reuse the existing guards
+
+`FDiffContext` already carries the depth cap and cycle guard; container recursion counts
+against the same budget. No new guard concepts.
+
+### Target output
+
+```
+Damage Applications Per Impact Result: 2 entries
+  ["Impact.Result.Block"]
+    DamageToApply[0]
+      TargetAttributeToEffect = Attribute.Posture
+      TargetAttributeAmountToApply = 20.000000
+  ["Impact.Result.Hit"]
+    DamageToApply[0]
+      TargetAttributeToEffect = Attribute.Health
+      TargetAttributeAmountToApply = 35.000000
+```
+
+### ⚠ Blast radius — the reason this is its own milestone
+
+`AppendPropertyDiffs` is now load-bearing for **every** section that took nine rounds to
+verify: Class Defaults, T1 instanced content, T2's generic fallback and DataAsset path, BT
+node settings, and T4 notify payloads. This is the single riskiest remaining change.
+
+**Acceptance is a regression diff, not a feature check:**
+- [ ] Re-dump GASP + TCF Samurai + our own `BP_BaseCharacter` / `ABP_Hero`, and diff against
+      the 10th-round dumps. Every changed line must be a value that *was* truncated or
+      exceeded the threshold. Anything else changing is a regression.
+- [ ] `(truncated)` count drops sharply; the remaining ones are genuinely long leaf strings.
+- [ ] TCF's damage map shows **both** `Impact.Result.Block` and `Impact.Result.Hit` with
+      their attribute names and numbers, nested.
+- [ ] Total dump size does not balloon — short values must still print flat.
+
+### API to verify at 5.7 before writing (per project doctrine)
+
+`FScriptMapHelper` (`Num`, `IsValidIndex`, `GetKeyPtr`, `GetValuePtr`,
+`FindMapIndexWithKey`), `FScriptSetHelper` (`Num`, `IsValidIndex`, `GetElementPtr`),
+`FMapProperty::KeyProp/ValueProp`, `FSetProperty::ElementProp`.
+
+---
+
 ## Parked ideas (only if a concrete need appears)
 
 Speculative "grow it into a product" milestones, cut to keep the plan focused on making dumps
@@ -732,7 +813,10 @@ Remaining:
 
 1. **Verify T4** (8th round, the only uncompiled code) — known-answers in its changelog
    entry. Re-run `DumpBPFolder /TempestCombatFramework -recursive`; montages now dump.
-2. Gap 1.5 (Property Access reflection) → `FText` localisation GUIDs → `Not Equal (Enum)`
+2. **M3 — structural container recursion** (see its section above). The honest fix for
+   D-2. Highest blast radius of anything left, so it gets a regression-diff acceptance
+   rather than a feature check.
+3. Gap 1.5 (Property Access reflection) → `FText` localisation GUIDs → `Not Equal (Enum)`
    → 1.3b/1.4b → rest of Phase 2. All polish; none blocks a decode.
 
 **With T4 verified, M1 and M2 are complete and the tool is done as a decode instrument.**
