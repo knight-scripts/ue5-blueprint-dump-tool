@@ -5,10 +5,18 @@
 > This is a personal tool for reading AnimBP/Blueprint dumps as ground truth; the goal is
 > trustworthy dumps, not features. Output stays **plain text** (the JSON idea was dropped).
 >
-> **Structure & order of work:** Phase 0 (correctness — do first) → Milestone 1 (data-pin
-> wiring / fidelity, incl. the Blend Stack settings + bindings decode) → Phase 2 (hygiene).
-> Phase 0 must land before M1: M1's recursive expression resolution multiplies the walker
-> workload, and the Phase 0 fixes determine whether that work produces truth or noise.
+> **STATUS 2026-07-26 — Phase 0, Milestone 1 and Milestone 2 are CLOSED and verified**
+> across five unrelated projects (~11,900 assets: GASP, AGLS/ALSv4, ALS-Refactored, the
+> Narrative plugins, TCF + its two demo samples). Every filed defect — F-1…F-6, N1, N2,
+> D-1, D-3 — is fixed and re-verified. Nothing is uncompiled.
+>
+> **The one open item is Milestone 3** (structural container recursion — the honest fix for
+> D-2's flat container export). It is specced, not built, and deliberately so: it lands on
+> `AppendPropertyDiffs`, which is load-bearing for every section verified over twelve
+> rounds. Read M3's blast-radius note before starting it.
+>
+> Remaining after M3, all polish that blocks nothing: Gap 1.5 (Property Access reflection),
+> `FText` localisation GUIDs, `Not Equal (Enum)`, 1.3b/1.4b, Phase 2 hygiene.
 > Speculative "grow it into a product" ideas are parked as one-liners at the end.
 >
 > **Copies:** the canonical home is this standalone repo. The host project embeds it as a
@@ -17,7 +25,22 @@
 > `git subtree pull --prefix=Plugins/BlueprintDumpTool <path-to-this-repo> main --squash`.
 > Never edit the embedded copy directly.
 
-## Current State (v1.0 — commit 19e210f)
+## Current State (2026-07-26, after twelve verification rounds)
+
+### Capabilities
+- **Assets**: Blueprints, AnimBlueprints, animation sequences/montages/composites,
+  DataAssets, BehaviorTrees + Blackboards, curves, DataTables, user structs/enums, and a
+  generic property-diff fallback that names the class of anything unhandled.
+- **Batch**: `DumpBPFolder <path> [-recursive] [-external] [-filter=Class]` → mirrored tree
+  + `_manifest.txt` with one reasoned row per asset found. One-File-Per-Actor packages are
+  skipped by default (visibly).
+- **Expressions**: function arguments recursed, string literals quoted, operator precedence
+  parenthesised, output-pin identity preserved (`.X`, `.Member`), shared sub-expressions
+  elided rather than re-expanded, depth truncation marked.
+- **Instanced content**: details-panel authoring (EditInlineNew objects, arrays of them,
+  structs wrapping them) recursed to depth 4 with a cycle guard — this is what makes
+  purchased-plugin decodes readable.
+- **Output**: UTF-8 without BOM, always.
 
 ### What Works Well
 - **AnimBP pose chain walks** — Full backward walk from Root through all anim nodes with correct depth/nesting
@@ -29,10 +52,16 @@
 - **Plugin path normalization** — Handles /All/, /Plugins/ prefixes, .AssetName suffixes
 - **Thread Safe Update functions** — Fully captured when implemented in Blueprint (proven on GASP: 700+ lines of function bodies, branches, data flow). Empty for C++-only projects (ALS) — this is correct behavior, not a gap.
 
-### Validated On
-- **ALS Refactored** — 24 dump files (10 AnimBPs, 4 Blueprints, monolithic + segmented). All structures captured. Empty function sections are correct — ALS logic lives in C++ (`AlsAnimationInstance`).
-- **GASP** — Full dump with thread-safe functions, chooser references, complex transition rules. ~700 lines of blueprint logic captured including `BlueprintThreadSafeUpdateAnimation`, `Update_Logic`, `Update_EssentialValues`, etc.
-- **A production project (private)** — additional real-world AnimBPs and Blueprints.
+### Validated On (2026-07-26 — five projects, whole-project runs)
+- **GASP** — 3132 assets, `/Game` recursive. The reference project throughout.
+- **AGLS / ALSv4** — 7287 assets. The scale adversary: it exposed shared-sub-expression
+  re-expansion (an 11,052-char line) and macro re-expansion, both of which were also
+  hurting GASP and TCF less visibly.
+- **ALS-Refactored** — 570 assets. Exposed D-3 (One-File-Per-Actor packages, 40% of the
+  run). Empty function sections are correct here — ALS logic lives in C++.
+- **Tempest Combat Framework** — 318 plugin assets + Mixamo (770) and Samurai (364) demo
+  samples. The milestone's purpose: combat windows and damage numbers now read as text.
+- **Project Summoning** — our own project; the H9 curve check now exists in text.
 
 ### Cross-Version Compatibility
 Built for UE 5.7.3 but **works on 5.5.1** (tested with ALS Refactored). UE shows a version warning, no actual problems. (Broader multi-version support is parked — see Parked ideas.)
@@ -790,7 +819,7 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 
 ---
 
-## Suggested Session Order (near-term Phase 0 / M1 work)
+## Session Order (historical — Phase 0 / M1 era; see "Next session" below for current)
 
 1. **0.1 + 0.8** (false cycle + missing parens) — **do together, same function
    (`BuildExpressionFromPin`); these two are what make transition-rule output trustworthy.**
@@ -835,7 +864,7 @@ dumps, not improving the reader.
 (source-only copy on machine 1). It needs the plugin installed to the engine, or a
 throwaway project with TCF + this plugin enabled, before `DumpBPFolder` can reach it.
 
-## Acceptance Checklist (Phase 0 / M1)
+## Acceptance Checklist (Phase 0 / M1) — all verified 2026-07-26
 
 - [ ] Test BP: one `Get` feeding both operands of an AND → both print, no `(cycle)`
 - [ ] Exec knot loop asset → dump completes with cycle marker, no crash
@@ -1439,6 +1468,13 @@ Compared 6 GASP functions as they appear in:
 
 **Recreatability score: 1/6 functions fully recreatable from dump alone.**
 Target after M1 completion: 5/6 functions recreatable (Property Access paths may remain partial).
+
+> ⚠ **The section above describes the 2026-07-02 BASELINE, before M1.** It is kept as the
+> record of what was broken and why. Post-M1 (verified 2026-07-26): pure-function arguments,
+> string literals, boolean operands, return values and output-pin identity all survive —
+> `Get_DynamicPlayRate` dumps its `Lerp(1.0, FClamp(SafeDivide(...)))` formula exactly as
+> this document once recorded it as unreachable. Property Access deep paths (Gap 1.5) remain
+> the one item still partial.
 
 ### ALS Architecture Validation
 
