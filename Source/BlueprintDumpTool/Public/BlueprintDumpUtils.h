@@ -65,7 +65,8 @@ public:
 	/** Recursively build expression string walking backward from a pin.
 	 *  No visited set: valid BP data graphs are DAGs (the compiler rejects true cycles),
 	 *  so shared subexpressions are legal and MaxDepth alone bounds the walk. */
-	static FString BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxDepth = 10, int32 CurrentDepth = 0);
+	static FString BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxDepth = 10, int32 CurrentDepth = 0,
+		TSet<const UEdGraphPin*>* Expanded = nullptr);
 
 	/** THE "what drives this pin" entry point — every walker and pin formatter routes
 	 *  through here. Three hand-copied versions of this used to short-circuit function
@@ -79,6 +80,10 @@ public:
 	/** Pin name without the internal "_<index>_<32 hex GUID>" suffix that pins generated
 	 *  from BLUEPRINT struct members carry. Native pin names are returned untouched. */
 	static FString FriendlyPinName(const UEdGraphPin* Pin);
+
+	/** Same GUID group removed from free text — BP-struct field names appear inside
+	 *  EXPORTED PROPERTY VALUES too, where no pin is involved. */
+	static FString StripMemberGuids(const FString& Text);
 
 	// --- Asset path normalization ---
 

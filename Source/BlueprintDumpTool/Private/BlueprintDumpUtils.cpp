@@ -368,6 +368,55 @@ FString FBlueprintDumpUtils::ResolveOperatorFromTitle(const FString& Title)
 	return ResolveOperatorSymbol(FirstWord);
 }
 
+FString FBlueprintDumpUtils::StripMemberGuids(const FString& Text)
+{
+	// BP-struct field names embedded in EXPORTED VALUES carry the same
+	// "_<index>_<32 hex>" group that pins do:
+	//   Settings = (VisualStaticMesh_49_2616A0B0440DC71D3F07CA8FD408AAEE="/Script/...")
+	// Pin names are handled by FriendlyPinName; this is the free-text half.
+	auto IsHexChar = [](TCHAR C)
+	{
+		return (C >= TEXT('0') && C <= TEXT('9'))
+			|| (C >= TEXT('A') && C <= TEXT('F'))
+			|| (C >= TEXT('a') && C <= TEXT('f'));
+	};
+
+	FString Result;
+	Result.Reserve(Text.Len());
+
+	for (const TCHAR* C = *Text; *C != TEXT('\0'); )
+	{
+		if (*C == TEXT('_'))
+		{
+			const TCHAR* Scan = C + 1;
+			int32 Digits = 0;
+			while (*Scan >= TEXT('0') && *Scan <= TEXT('9'))
+			{
+				++Scan;
+				++Digits;
+			}
+			if (Digits > 0 && *Scan == TEXT('_'))
+			{
+				const TCHAR* Hex = Scan + 1;
+				int32 HexLen = 0;
+				while (HexLen < 32 && IsHexChar(Hex[HexLen]))
+				{
+					++HexLen;
+				}
+				// Exactly 32 hex digits, not followed by more — that is the GUID group
+				if (HexLen == 32 && !IsHexChar(Hex[32]))
+				{
+					C = Hex + 32;
+					continue;
+				}
+			}
+		}
+		Result.AppendChar(*C++);
+	}
+
+	return Result;
+}
+
 FString FBlueprintDumpUtils::FriendlyPinName(const UEdGraphPin* Pin)
 {
 	if (!Pin)
@@ -522,8 +571,18 @@ FString FBlueprintDumpUtils::ResolvePinSourceLabel(UEdGraphPin* LinkedPin, int32
 	return BuildExpressionFromPin(LinkedPin, MaxDepth);
 }
 
-FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxDepth, int32 CurrentDepth)
+FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxDepth, int32 CurrentDepth,
+	TSet<const UEdGraphPin*>* Expanded)
 {
+	// One memo per TOP-LEVEL expression. BP data flow is a DAG, so a node feeding N
+	// consumers was re-expanded N times: an AGLS line reached 11052 chars holding 62
+	// copies of the same call. First occurrence prints in full, later ones elide.
+	TSet<const UEdGraphPin*> RootExpanded;
+	if (!Expanded)
+	{
+		Expanded = &RootExpanded;
+	}
+
 	if (!Pin)
 	{
 		return TEXT("???");
@@ -566,7 +625,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 		{
 			if (KnotPin->Direction == EGPD_Input && KnotPin->LinkedTo.Num() > 0)
 			{
-				return BuildExpressionFromPin(KnotPin->LinkedTo[0], MaxDepth, CurrentDepth + 1);
+				return BuildExpressionFromPin(KnotPin->LinkedTo[0], MaxDepth, CurrentDepth + 1, Expanded);
 			}
 		}
 		return TEXT("???");
@@ -616,7 +675,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 				&& InputPin->LinkedTo.Num() > 0
 				&& InputPin->LinkedTo[0])
 			{
-				const FString Source = BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1);
+				const FString Source = BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1, Expanded);
 
 				// A SPLIT member reads as one more hop: CharacterProperties.LandVelocity.Z
 				FString Member = FriendlyPinName(Pin);
@@ -639,6 +698,26 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 		return QualifyOutput(VarGet->GetVarName().ToString(), Pin, Node);
 	}
 
+	// Variable SET read as a data source — its output pin carries the variable, so the
+	// value is the variable's name. The generic fallback used to render the assignment
+	// itself: "Set Local Damage To Apply(<whole assigned expression>)".
+	if (UK2Node_VariableSet* VarSet = Cast<UK2Node_VariableSet>(Node))
+	{
+		return QualifyOutput(VarSet->GetVarName().ToString(), Pin, Node);
+	}
+
+	// Macro instance (ForEachLoop, IsValid, ...) — name the macro and the output pin.
+	// Do NOT re-expand its inputs: the exec walker already prints them on the macro's
+	// own line, and re-expanding made every nested loop square its predecessor
+	// ("For Each Loop(For Each Loop(...).Array Element).Array Element").
+	if (UK2Node_MacroInstance* MacroNode = Cast<UK2Node_MacroInstance>(Node))
+	{
+		const FString MacroName = MacroNode->GetMacroGraph()
+			? MacroNode->GetMacroGraph()->GetName()
+			: TEXT("Macro");
+		return QualifyOutput(MacroName, Pin, Node);
+	}
+
 	// Function call node — could be an operator or a function
 	if (UK2Node_CallFunction* FuncCall = Cast<UK2Node_CallFunction>(Node))
 	{
@@ -657,7 +736,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 					if (InputPin->LinkedTo.Num() > 0)
 					{
 						return Grouped(FString::Printf(TEXT("NOT %s"),
-							*BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1)));
+							*BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1, Expanded)));
 					}
 				}
 			}
@@ -678,7 +757,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 				{
 					if (InputPin->LinkedTo.Num() > 0)
 					{
-						Operands.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1));
+						Operands.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1, Expanded));
 					}
 					else
 					{
@@ -712,6 +791,13 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 		// returning the bare name here was THE M1 data-loss bug (Gaps 1.1/1.2/1.4).
 		// "Lerp()" becomes "Lerp(1.0, Clamp(SafeDivide(Speed2D, Rate), Min, Max), Alpha)".
 		{
+			// Already expanded in THIS expression? Elide the repeat.
+			if (CurrentDepth > 0 && Expanded->Contains(Pin))
+			{
+				return QualifyOutput(FuncNameStr + TEXT("(...)"), Pin, Node);
+			}
+			Expanded->Add(Pin);
+
 			TArray<FString> Args;
 			for (UEdGraphPin* InputPin : Node->Pins)
 			{
@@ -721,7 +807,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 
 				if (InputPin->LinkedTo.Num() > 0 && InputPin->LinkedTo[0])
 				{
-					Args.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1));
+					Args.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1, Expanded));
 				}
 				else
 				{
@@ -747,6 +833,20 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 	// Generic fallback — try to extract expression from input pins
 	// Handles custom comparison nodes, enum equality, etc. that aren't UK2Node_CallFunction
 	{
+		FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+		NodeTitle.ReplaceInline(TEXT("\n"), TEXT(" "));
+
+		// Already expanded in THIS expression? Elide the repeat rather than re-walking a
+		// shared DAG branch (Break nodes with many outputs are the worst offenders).
+		if (CurrentDepth > 0 && HasDataInput(Node))
+		{
+			if (Expanded->Contains(Pin))
+			{
+				return QualifyOutput(NodeTitle + TEXT("(...)"), Pin, Node);
+			}
+			Expanded->Add(Pin);
+		}
+
 		TArray<FString> Operands;
 		for (UEdGraphPin* InputPin : Node->Pins)
 		{
@@ -756,7 +856,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 
 			if (InputPin->LinkedTo.Num() > 0)
 			{
-				Operands.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1));
+				Operands.Add(BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1, Expanded));
 			}
 			else
 			{
@@ -767,9 +867,6 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 				}
 			}
 		}
-
-		FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
-		NodeTitle.ReplaceInline(TEXT("\n"), TEXT(" "));
 
 		// Try to resolve operator from title (e.g., "Equal (Enum)" -> "==")
 		FString OpSymbol = ResolveOperatorFromTitle(NodeTitle);
@@ -1568,6 +1665,7 @@ namespace
 
 		FString ValueStr;
 		Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, ExportOwner, PPF_None);
+		ValueStr = FBlueprintDumpUtils::StripMemberGuids(ValueStr);
 		if (ValueStr.IsEmpty())
 		{
 			ValueStr = TEXT("(empty)");

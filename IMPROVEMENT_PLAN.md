@@ -670,7 +670,7 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 - ~~**Animation metadata inline**~~ — notify half **PROMOTED 2026-07-26 → M2/T4**; the rest
   (clip duration, curves, root motion next to Sequence Players) stays parked here.
 - **Blend Space details** — axes, sample points. *(Project uses discrete directional clips, not blendspaces.)*
-- **Chooser Table dumping** — Motion-Matching selection logic. *(GASP reference only; project doesn't use choosers.)*
+- **Chooser Table dumping** — Motion-Matching selection logic. *(GASP reference only; project doesn't use choosers. Note: their `ColumnsStructs` value now dumps GUID-free as of the 6th round, so the raw text is at least readable.)*
 - **Reroute node collapse** — skip visual-only routing nodes in pose-chain output.
 - **Cross-reference index** — "which AnimBPs use animation X". *(Depended on JSON, which was dropped.)*
 - **UE5 multi-version compatibility** — `#if` guards + test matrix for 5.4–5.8. *(Marketplace concern.)*
@@ -777,6 +777,64 @@ missing data flow.
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-26 (6th round) — the four-project stress test: 2 fixes verified, 6 defects found
+
+Verified across **11,551 dumps** — GASP (3083), **AGLS/ALSv4 (7287, a new MM project)**,
+Narrative plugins (855), **TCF (318)**.
+
+**✅ 5th round verified.** Encoding: **0 UTF-16 files of 11,551** (was 87%). GUID leakage in
+GASP: 11 → **3**, and those 3 are exactly the predicted Chooser `ColumnsStructs` lines.
+
+**⭐ M2's whole purpose is met.** TCF: 321 found / 318 dumped / 3 redirectors, 9980 lines of
+text from what the decode called "policy locked in 319 uassets". T1 delivers on the real
+target — `ImpactProperties[0] (InstancedImpactProperties) → ImpactProperty =
+BP_DamagePerImpactProperty_C` — and every T2 path is finally exercised for real
+(19 UserDefinedStructs, 4 enums, the BT + Blackboard, curves, InputActions, a DataTable).
+The BT dump reads as intended: `Decorator: BTD_CheckStates` with
+`AI State Tag = (GameplayTags=(("State.ReturnToPost"),("State.Go To Location"),…))`.
+
+**Six defects the scale exposed — all fixed in this round:**
+
+- **F-1 GUIDs in exported VALUES.** The same `_<index>_<32 hex>` group appears inside
+  exported *property values*, where no pin exists: AGLS's
+  `Settings = (VisualStaticMesh_49_2616A0B0…="…")`, and the 3 Chooser lines previously
+  written off as out of scope. New `StripMemberGuids` runs over exported text, so both are
+  now covered — the Chooser exclusion is retired.
+- **F-2a VariableSet read as a data source** rendered the *assignment*:
+  `Set Local Damage To Apply(<entire assigned expression>)`. It now renders the variable
+  name. 70 occurrences.
+- **F-2b Macro instances re-expanded their inputs at every output read**, so nested loops
+  squared: `For Each Loop(For Each Loop(…).Array Element).Array Element`. Macros now render
+  `MacroName.PinName` — their inputs are already printed on the macro's own exec line.
+  **1449 occurrences.**
+- **F-3 shared DAG sub-expressions re-expanded per consumer** — the big one. One AGLS line
+  reached **11,052 characters** holding 62 copies of `FindObjectCenterTraceConfig(...)` and
+  31 of `LineTraceSingle(...)`. This is the cost of Phase 0.1 removing the visited set: that
+  was right for correctness (the set produced false `(cycle)` claims) but left re-expansion
+  unbounded. Now a **per-top-level-expression memo** prints the first occurrence in full and
+  elides repeats as `Name(...)`. Note this is *not* a return to 0.1's bug: the marker claims
+  "arguments elided", never "cycle", and the memo is scoped to one expression.
+- **F-4 BT structural noise.** `TreeAsset`, `ParentNode`, `Children`, `Services`,
+  `Decorators` repeated on every node, burying the authored settings the tree walk exists to
+  show. Filtered — the tree walk already renders that structure.
+- **F-5 container field types truncated.** `Damage To Apply : TArray` should be
+  `TArray<S_DamageToApply>`; `GetCPPType` puts the inner type in its `ExtendedTypeText`
+  out-param, which the T2 struct dumper was discarding. 19 TCF structs were affected.
+
+**Known-answers for the next round:** no `For Each Loop(` as an *argument*; no `= Set X(`;
+AGLS's longest line well under 11k (the `BP_ClimbingMovementComponent` `Return (CMC Ledge=…)`
+line is the benchmark); `Damage To Apply : TArray<...>`; no `_<digits>_<32 hex>` anywhere at
+all, Chooser included; BT nodes free of `TreeAsset`/`ParentNode`.
+
+**Observed, not fixed (filed):** `FText` values export with localisation GUIDs
+(`NSLOCTEXT("[56ACCA…]", "500390…", "Forward")`) — the readable string is the third
+argument. Cheap to reduce to the source string if data-table/UI dumps become load-bearing.
+
+**Narrative note:** 855 assets across 5 mounts, but 553 are Texture2D and the rest is mostly
+UI widgets — the plugins ship a *framework*, and the quest/dialogue **content** lives in a
+game project, not here. Nothing to decode that `NARRATIVE3_DECODE_2026_07_24.md` did not
+already cover from source.
 
 ### 2026-07-26 (5th round) — ⭐ dumps were being written as UTF-16; plus the last GUID cases
 

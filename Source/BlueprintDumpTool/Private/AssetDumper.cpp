@@ -73,8 +73,9 @@ namespace
 			FString ValueStr;
 			Prop->ExportTextItem_Direct(ValueStr, Prop->ContainerPtrToValuePtr<void>(Data),
 				nullptr, nullptr, PPF_None);
-			Output += FString::Printf(TEXT("%s%s = %s\n"),
-				*Prefix, *Struct->GetAuthoredNameForField(Prop), *Truncate(MoveTemp(ValueStr)));
+			Output += FString::Printf(TEXT("%s%s = %s\n"), *Prefix,
+				*Struct->GetAuthoredNameForField(Prop),
+				*Truncate(FBlueprintDumpUtils::StripMemberGuids(ValueStr)));
 		}
 	}
 
@@ -86,6 +87,45 @@ namespace
 			return;
 		}
 		FBlueprintDumpUtils::DumpObjectPropertyDiffs(Object, nullptr, Prefix, Output);
+	}
+
+	/** Behavior-tree nodes carry structural back-pointers and child arrays that the tree
+	 *  walk already renders; printing them per node buries the authored settings. */
+	void AppendBTNodeProperties(UObject* Node, const FString& Prefix, FString& Output)
+	{
+		if (!Node)
+		{
+			return;
+		}
+
+		FString All;
+		FBlueprintDumpUtils::DumpObjectPropertyDiffs(Node, nullptr, Prefix, All);
+
+		static const TCHAR* StructuralPrefixes[] =
+		{
+			TEXT("TreeAsset ="), TEXT("ParentNode ="), TEXT("Children ="),
+			TEXT("Services ="), TEXT("Decorators ="), TEXT("DecoratorOps ="),
+		};
+
+		TArray<FString> Lines;
+		All.ParseIntoArrayLines(Lines, /*InCullEmpty=*/false);
+		for (const FString& Line : Lines)
+		{
+			const FString Trimmed = Line.TrimStart();
+			bool bStructural = false;
+			for (const TCHAR* Skip : StructuralPrefixes)
+			{
+				if (Trimmed.StartsWith(Skip))
+				{
+					bStructural = true;
+					break;
+				}
+			}
+			if (!bStructural && !Trimmed.IsEmpty())
+			{
+				Output += Line + TEXT("\n");
+			}
+		}
 	}
 
 	FString InterpModeToString(TEnumAsByte<ERichCurveInterpMode> Mode)
@@ -124,7 +164,7 @@ namespace
 		}
 		Output += FString::Printf(TEXT("%s%s: %s (%s)\n"),
 			*Pad(Depth), Kind, *Node->GetNodeName(), *Node->GetClass()->GetName());
-		AppendAuthoredProperties(Node, Pad(Depth + 1), Output);
+		AppendBTNodeProperties(Node, Pad(Depth + 1), Output);
 	}
 
 	void AppendBTComposite(UBTCompositeNode* Composite, int32 Depth, FString& Output)
@@ -136,7 +176,7 @@ namespace
 
 		Output += FString::Printf(TEXT("%s%s (%s)\n"),
 			*Pad(Depth), *Composite->GetNodeName(), *Composite->GetClass()->GetName());
-		AppendAuthoredProperties(Composite, Pad(Depth + 1), Output);
+		AppendBTNodeProperties(Composite, Pad(Depth + 1), Output);
 
 		for (UBTService* Service : Composite->Services)
 		{
@@ -252,8 +292,12 @@ FString FAssetDumper::DumpLoadedAsset(UObject* Asset)
 		for (TFieldIterator<FProperty> It(Struct); It; ++It)
 		{
 			const FProperty* Prop = *It;
-			Output += FString::Printf(TEXT("  %s : %s\n"),
-				*Struct->GetAuthoredNameForField(Prop), *Prop->GetCPPType());
+			// GetCPPType puts the inner type in ExtendedTypeText: without it every
+			// container field dumped as a bare "TArray" / "TMap".
+			FString Extended;
+			const FString BaseType = Prop->GetCPPType(&Extended, /*CPPExportFlags=*/0);
+			Output += FString::Printf(TEXT("  %s : %s%s\n"),
+				*Struct->GetAuthoredNameForField(Prop), *BaseType, *Extended);
 		}
 		Output += TEXT("\n");
 		return Output;
