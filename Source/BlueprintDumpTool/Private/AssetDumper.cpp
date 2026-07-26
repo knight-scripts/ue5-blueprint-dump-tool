@@ -17,6 +17,16 @@
 #include "Curves/CurveVector.h"
 #include "Curves/CurveLinearColor.h"
 
+#include "Animation/AnimSequenceBase.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimCompositeBase.h"
+#include "Animation/AnimTypes.h"
+#include "Animation/AnimCurveTypes.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Animation/Skeleton.h"
+#include "AlphaBlend.h"
+
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BTCompositeNode.h"
 #include "BehaviorTree/BTTaskNode.h"
@@ -149,6 +159,159 @@ namespace
 			Output += FString::Printf(TEXT("    t=%.4f  v=%.4f  interp=%s  arrive=%.4f  leave=%.4f\n"),
 				Key.Time, Key.Value, *InterpModeToString(Key.InterpMode),
 				Key.ArriveTangent, Key.LeaveTangent);
+		}
+	}
+
+	// --- Animation assets (T4) ---
+	//
+	// Combat and traversal TIMING lives on montages, not in classes: an attack's trace
+	// window, its allowed-input window, its rotation window are all notify states with a
+	// start and a duration. "How long is the deflect window" is unanswerable without this.
+	// The same data answers our own H10 commitment-window and jump-window questions.
+
+	/** Keys are printed in full up to this many; beyond it the summary line still carries
+	 *  count and ranges, so a baked per-frame curve stays honest without flooding. */
+	constexpr int32 MaxCurveKeysPrinted = 64;
+
+	void AppendAnimNotifies(const UAnimSequenceBase* Anim, FString& Output)
+	{
+		const TArray<FAnimNotifyEvent>& Events = Anim->Notifies;
+		if (Events.Num() == 0)
+		{
+			return;
+		}
+
+		// Authored order is not guaranteed to be time order
+		TArray<int32> Order;
+		Order.Reserve(Events.Num());
+		for (int32 i = 0; i < Events.Num(); ++i)
+		{
+			Order.Add(i);
+		}
+		Order.Sort([&Events](int32 A, int32 B)
+		{
+			return Events[A].GetTriggerTime() < Events[B].GetTriggerTime();
+		});
+
+		Output += FString::Printf(TEXT("=== Notifies (%d) ===\n"), Events.Num());
+		for (const int32 Index : Order)
+		{
+			const FAnimNotifyEvent& Event = Events[Index];
+
+			// A notify STATE has a duration (the window); a plain notify is an instant
+			const float Start = Event.GetTriggerTime();
+			const float Duration = Event.GetDuration();
+			FString TimeStr = Duration > 0.0f
+				? FString::Printf(TEXT("t=%.4f  dur=%.4f  end=%.4f"), Start, Duration, Start + Duration)
+				: FString::Printf(TEXT("t=%.4f"), Start);
+
+			FString TrackLabel = FString::Printf(TEXT("track=%d"), Event.TrackIndex);
+#if WITH_EDITORONLY_DATA
+			if (Anim->AnimNotifyTracks.IsValidIndex(Event.TrackIndex))
+			{
+				TrackLabel += FString::Printf(TEXT(" '%s'"),
+					*Anim->AnimNotifyTracks[Event.TrackIndex].TrackName.ToString());
+			}
+#endif
+
+			UAnimNotifyState* StateNotify = Event.NotifyStateClass;
+			UAnimNotify* InstantNotify = Event.Notify;
+			UObject* NotifyObject = StateNotify
+				? static_cast<UObject*>(StateNotify)
+				: static_cast<UObject*>(InstantNotify);
+			const FString ClassName = NotifyObject
+				? NotifyObject->GetClass()->GetName()
+				: TEXT("(none)");
+
+			Output += FString::Printf(TEXT("  %s  %s  %s (%s)\n"),
+				*TimeStr, *TrackLabel, *Event.NotifyName.ToString(), *ClassName);
+
+			// The notify's OWN properties — instanced attack/feel properties live here,
+			// so T1's recursion is what makes this worth dumping at all.
+			AppendAuthoredProperties(NotifyObject, TEXT("      "), Output);
+		}
+		Output += TEXT("\n");
+	}
+
+	void AppendAnimCurves(const UAnimSequenceBase* Anim, FString& Output)
+	{
+		const TArray<FFloatCurve>& Curves = Anim->GetCurveData().FloatCurves;
+		if (Curves.Num() == 0)
+		{
+			return;
+		}
+
+		Output += FString::Printf(TEXT("=== Curves (%d) ===\n"), Curves.Num());
+		for (const FFloatCurve& Curve : Curves)
+		{
+			const TArray<FRichCurveKey>& Keys = Curve.FloatCurve.GetConstRefOfKeys();
+
+			float MinV = 0.0f, MaxV = 0.0f;
+			for (int32 i = 0; i < Keys.Num(); ++i)
+			{
+				MinV = (i == 0) ? Keys[i].Value : FMath::Min(MinV, Keys[i].Value);
+				MaxV = (i == 0) ? Keys[i].Value : FMath::Max(MaxV, Keys[i].Value);
+			}
+
+			Output += FString::Printf(TEXT("  %s : %d key(s)"),
+				*Curve.GetName().ToString(), Keys.Num());
+			if (Keys.Num() > 0)
+			{
+				Output += FString::Printf(TEXT("  value[%.4f..%.4f]  time[%.4f..%.4f]"),
+					MinV, MaxV, Keys[0].Time, Keys.Last().Time);
+			}
+			Output += TEXT("\n");
+
+			const int32 Printed = FMath::Min(Keys.Num(), MaxCurveKeysPrinted);
+			for (int32 i = 0; i < Printed; ++i)
+			{
+				Output += FString::Printf(TEXT("      t=%.4f  v=%.4f\n"), Keys[i].Time, Keys[i].Value);
+			}
+			if (Keys.Num() > Printed)
+			{
+				Output += FString::Printf(TEXT("      ... (%d more keys; summary above is complete)\n"),
+					Keys.Num() - Printed);
+			}
+		}
+		Output += TEXT("\n");
+	}
+
+	void AppendMontageStructure(const UAnimMontage* Montage, FString& Output)
+	{
+		Output += FString::Printf(TEXT("Blend In: %.4fs   Blend Out: %.4fs   BlendOutTriggerTime: %.4f\n\n"),
+			Montage->BlendIn.GetBlendTime(), Montage->BlendOut.GetBlendTime(),
+			Montage->BlendOutTriggerTime);
+
+		if (Montage->CompositeSections.Num() > 0)
+		{
+			Output += FString::Printf(TEXT("=== Sections (%d) ===\n"), Montage->CompositeSections.Num());
+			for (const FCompositeSection& Section : Montage->CompositeSections)
+			{
+				Output += FString::Printf(TEXT("  %-24s t=%.4f  -> next: %s\n"),
+					*Section.SectionName.ToString(), Section.GetTime(),
+					Section.NextSectionName.IsNone() ? TEXT("(stop)") : *Section.NextSectionName.ToString());
+			}
+			Output += TEXT("\n");
+		}
+
+		if (Montage->SlotAnimTracks.Num() > 0)
+		{
+			Output += FString::Printf(TEXT("=== Slots (%d) ===\n"), Montage->SlotAnimTracks.Num());
+			for (const FSlotAnimationTrack& Slot : Montage->SlotAnimTracks)
+			{
+				Output += FString::Printf(TEXT("  %s\n"), *Slot.SlotName.ToString());
+				for (int32 i = 0; i < Slot.AnimTrack.AnimSegments.Num(); ++i)
+				{
+					const FAnimSegment& Segment = Slot.AnimTrack.AnimSegments[i];
+					const UAnimSequenceBase* Ref = Segment.GetAnimReference();
+					Output += FString::Printf(
+						TEXT("    [%d] %s  start=%.4f  anim=[%.4f..%.4f]  rate=%.4f  loops=%d\n"),
+						i, Ref ? *Ref->GetName() : TEXT("(none)"),
+						Segment.StartPos, Segment.AnimStartTime, Segment.AnimEndTime,
+						Segment.AnimPlayRate, Segment.LoopingCount);
+				}
+			}
+			Output += TEXT("\n");
 		}
 	}
 
@@ -355,6 +518,40 @@ FString FAssetDumper::DumpLoadedAsset(UObject* Asset)
 			AppendRichCurve(CurveColor->FloatCurves[i], Channels[i], Output);
 		}
 		Output += TEXT("\n");
+		return Output;
+	}
+
+	// --- Animation assets: montages, sequences, composites (T4) ---
+	if (UAnimSequenceBase* Anim = Cast<UAnimSequenceBase>(Asset))
+	{
+		const UAnimMontage* Montage = Cast<UAnimMontage>(Anim);
+		Output += FString::Printf(TEXT("=== %s: %s (%s) ===\n"),
+			Montage ? TEXT("Montage") : TEXT("Animation"), *Anim->GetName(), *ClassName);
+		Output += FString::Printf(TEXT("Skeleton: %s\n"),
+			Anim->GetSkeleton() ? *Anim->GetSkeleton()->GetName() : TEXT("(none)"));
+		Output += FString::Printf(TEXT("Length: %.4fs   RateScale: %.4f\n"),
+			Anim->GetPlayLength(), Anim->RateScale);
+
+		if (Montage)
+		{
+			AppendMontageStructure(Montage, Output);
+		}
+		else
+		{
+			Output += TEXT("\n");
+		}
+
+		AppendAnimNotifies(Anim, Output);
+		AppendAnimCurves(Anim, Output);
+
+		// Root motion, looping, interpolation and friends ride the generic diff rather
+		// than a hand-listed set that would drift against the engine.
+		Output += TEXT("=== Properties (differ from class defaults) ===\n");
+		if (FBlueprintDumpUtils::DumpObjectPropertyDiffs(Asset, nullptr, TEXT("  "), Output) == 0)
+		{
+			Output += TEXT("  (none - every property is at its class default)\n");
+		}
+		Output += TEXT("  (not listed = class default)\n\n");
 		return Output;
 	}
 

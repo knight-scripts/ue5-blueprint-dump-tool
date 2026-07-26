@@ -600,7 +600,7 @@ expression-collapsing dump of 319 assets produces 319 files of node names.
   no such assets in `/Game/Summoning`; they come with the TCF pass.
 - [x] T3: manifest row count == asset count — **PASSED**: 208 found = 35 dumped + 173
   skipped, every skip carrying `(class filter)`. Mirrored tree correct.
-- [ ] T4: dump a montage carrying `ANS_AttackTrace` → notify class, start, duration, and the instanced attack property all present *(not built)*
+- [ ] T4: dump a montage carrying `ANS_AttackTrace` → notify class, start, duration, and the instanced attack property all present *(built 2026-07-26, uncompiled)*
 - [x] T5: `CanSprint` renders both operands of the AND — **PASSED**:
   `Break S Player Input State(CharacterInputState) && Select((Abs(NormalizedDeltaRotator(
   K2_GetActorRotation(), Conv_VectorToRotator(Select))) < 50.000000), true,
@@ -728,16 +728,17 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 Everything in M1 core and M2 (T1/T2/T3, N1/N2, and the 6th-round F-1…F-5) is verified on
 machine 2 across three unrelated projects totalling 10,688 assets. No pending compile.
 
-Remaining, in value order:
+Remaining:
 
-1. **T4 — montage notify tracks.** The only milestone item left, and the one that answers
-   "how long is the deflect window" from TCF's montages.
+1. **Verify T4** (8th round, the only uncompiled code) — known-answers in its changelog
+   entry. Re-run `DumpBPFolder /TempestCombatFramework -recursive`; montages now dump.
 2. Gap 1.5 (Property Access reflection) → `FText` localisation GUIDs → `Not Equal (Enum)`
    → 1.3b/1.4b → rest of Phase 2. All polish; none blocks a decode.
 
-**The tool is done as a decode instrument for anything already dumpable.** Scale is proven
-(7287-asset project, 3509-char worst line, zero guard pathologies) and TCF's 318 assets are
-in text. The next real work is reading those dumps, not improving the reader.
+**With T4 verified, M1 and M2 are complete and the tool is done as a decode instrument.**
+Scale is proven (7287-asset project, 3509-char worst line, zero guard pathologies), TCF's
+318 assets are in text, and combat timing is readable. The next real work is reading those
+dumps, not improving the reader.
 
 **The TCF pass itself is unblocked** — but note TCF is not mounted in the host project
 (source-only copy on machine 1). It needs the plugin installed to the engine, or a
@@ -778,6 +779,37 @@ missing data flow.
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-26 (8th round) — T4 animation assets (⚠ pending machine-2 compile)
+
+The last M2 item. Handles **any `UAnimSequenceBase`** — montages, sequences, composites —
+not just montages, because our own window forensics (H10 commitment windows, the jump
+program) live on sequences too.
+
+Per asset: skeleton, play length, rate scale, then
+- **Notifies** — sorted by trigger time (authored order is not time order), each with
+  `t=` / `dur=` / `end=` for notify STATES and `t=` alone for instant notifies, the track
+  index **and its authored track name**, the notify class, and **the notify's own
+  properties through T1's instanced recursion**. That last part is the whole point: TCF's
+  `ANS_AttackTrace` carries an instanced attack property and `ANS_SetAllowedInputs` carries
+  `AllowedInputs[]`, so the window and its payload land together.
+- **Sections** (montages) — name, time, and next-section, which is the montage's control
+  flow.
+- **Slots + segments** (montages) — slot name, then per segment the referenced animation,
+  start position, the `[AnimStart..AnimEnd]` sub-range, play rate and loop count.
+- **Curves** — name, key count, value range and time range, then the keys themselves up to
+  64 with an explicit "N more keys" marker. This is slightly beyond T4's letter (the parked
+  "animation metadata" line covers curves *next to Sequence Players*, which is a different
+  feature), but H9 — "missing animation curves fail SILENTLY to zero; verify existence on
+  the actual asset" — is a hard rule here, and this answers it directly.
+- **Properties** — the generic diff closes the section, so root motion, looping and
+  interpolation come along without a hand-listed field set that would drift against the
+  engine.
+
+**Known-answers:** a TCF montage with `ANS_AttackTrace` shows the trace window's start and
+duration *and* its instanced attack property nested underneath; a GASP locomotion clip lists
+`contact_l` / `contact_r` / `movedata_speed` with key counts; our own `AS_Run_Turn` family
+shows `RemainingTurnYaw` with a value range (the H9 check, in text, for the first time).
 
 ### 2026-07-26 (7th round) — ✅ ALL SIX FIXES VERIFIED. M1 + M2 (less T4) CLOSED.
 
