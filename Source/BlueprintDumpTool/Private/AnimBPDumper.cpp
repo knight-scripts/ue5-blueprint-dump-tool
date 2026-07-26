@@ -277,7 +277,7 @@ void FAnimBPDumper::ExecuteCommand(const TArray<FString>& Args)
 	IFileManager::Get().MakeDirectory(*OutputDir, true);
 	FString OutputPath = FPaths::Combine(OutputDir, AssetName + TEXT("_Dump.txt"));
 
-	if (FFileHelper::SaveStringToFile(Result, *OutputPath))
+	if (FFileHelper::SaveStringToFile(Result, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
 		UE_LOG(LogTemp, Display, TEXT("AnimBP dump written to: %s"), *OutputPath);
 	}

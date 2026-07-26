@@ -728,8 +728,8 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
 M1 core, T1, T2, T3, N1 and N2 are all machine-2 verified. Only the GUID-suffix fix
 (4th round) is uncompiled. Remaining work, in value order:
 
-1. **Verify the GUID fix** — re-dump `BP_TraversalComponent` (or any traversal asset) and
-   confirm `TraversalCheckResult.BackLedgeHeight` with no hex tail. Cheap known-answer.
+1. **Verify the 5th round** (encoding + last GUID cases) — known-answers in its changelog
+   entry. The encoding one is a one-liner: `head -c2` on any dump must NOT be `fffe`.
 2. **T4 — montage notify tracks.** The last blocker for combat-timing decode.
 3. Gap 1.5 (Property Access reflection) → `Not Equal (Enum)` → 1.3b/1.4b → rest of Phase 2.
 
@@ -777,6 +777,39 @@ missing data flow.
 ---
 
 ## Completed Improvements (Changelog)
+
+### 2026-07-26 (5th round) — ⭐ dumps were being written as UTF-16; plus the last GUID cases
+
+**Output encoding — the significant one.** `FFileHelper::SaveStringToFile` defaults to
+`EEncodingOptions::AutoDetect`, which writes **UTF-16** the moment a string contains any
+non-ASCII character. Measured on `GASPGame.7z`: **2687 of 3083 dumps (87%) were UTF-16LE.**
+For a tool whose entire product is plain text read by grep and by AI, that is a defect in
+the deliverable itself, not a cosmetic one. `sed`, `cut` and `cat -v` fail outright on
+those files ("illegal byte sequence"); `grep` on macOS happens to decode them, which is
+why it went unnoticed for two verification rounds and why the marker censuses in the
+4th-round entry remain valid.
+
+All four write sites now pass `EEncodingOptions::ForceUTF8WithoutBOM` (single-asset
+`DumpBP`, `DumpAnimBP`, the batch per-asset writes, and the manifest). Contributing cause
+on our side: three emitted literals of ours used em-dashes; those are now ASCII, and any
+future non-ASCII in *content* is now harmless rather than encoding-flipping.
+
+**The last GUID cases.** The 4th-round fix took leakage from 494 occurrences / 21 files to
+**11 / 6**. Reading the residue found two distinct causes:
+- **8 of 11 — the GUID group sits in the MIDDLE**, not at the tail, when the member is a
+  SPLIT struct pin: `GridSizes_16_782DDA9B..._X`, `LandVelocity_40_AD6ED73D..._Z`.
+  `FriendlyPinName` now scans for the `_<index>_<32 hex>` group anywhere past the first
+  token instead of only stripping a suffix. The Break-struct branch also became
+  parent-aware, so a split member reads `CharacterProperties.LandVelocity.Z` rather than
+  `…LandVelocity_Z`.
+- **3 of 11 — not pin names at all**: the Chooser table `ColumnsStructs` property, whose
+  raw `ExportTextItem_Direct` text embeds a property-binding chain containing GUID'd names.
+  That is engine text-export inside a value we print verbatim (and truncate at 220 chars).
+  **Out of scope by decision** — Chooser Table dumping is a parked non-goal.
+
+Known-answers for the next round: no `_<digits>_<32 hex>` anywhere outside the three
+Chooser lines; `TraversalCheckResult.BackLedgeHeight` and `UpdateMaterials.GridSizes.X`
+both clean; and **zero dumps with a `fffe` BOM** (`head -c2` on any dump).
 
 ### 2026-07-26 (4th round) — GUID suffix leak (found by the whole-game verification)
 

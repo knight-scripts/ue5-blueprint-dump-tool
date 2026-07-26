@@ -391,14 +391,14 @@ FString FAssetDumper::DumpLoadedAsset(UObject* Asset)
 	if (!bIsDataAsset)
 	{
 		Output += FString::Printf(
-			TEXT("NOTE: no specialised dumper for '%s' — generic property dump below.\n\n"), *ClassName);
+			TEXT("NOTE: no specialised dumper for '%s' - generic property dump below.\n\n"), *ClassName);
 	}
 
 	Output += TEXT("=== Properties (differ from class defaults) ===\n");
 	const int32 Diffs = FBlueprintDumpUtils::DumpObjectPropertyDiffs(Asset, nullptr, TEXT("  "), Output);
 	if (Diffs == 0)
 	{
-		Output += TEXT("  (none — every property is at its class default)\n");
+		Output += TEXT("  (none - every property is at its class default)\n");
 	}
 	Output += TEXT("  (not listed = class default)\n\n");
 
@@ -524,7 +524,7 @@ void FAssetDumper::ExecuteFolderCommand(const TArray<FString>& Args)
 		IFileManager::Get().MakeDirectory(*MirroredDir, /*Tree=*/true);
 		const FString OutputPath = FPaths::Combine(MirroredDir, AssetName + TEXT("_Dump.txt"));
 
-		if (FFileHelper::SaveStringToFile(Dump, *OutputPath))
+		if (FFileHelper::SaveStringToFile(Dump, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 		{
 			AddRow(AssetName, TypeLabel, FString::Printf(TEXT("dumped -> %s/%s_Dump.txt"), *PackagePath, *AssetName));
 			++DumpedCount;
@@ -552,7 +552,7 @@ void FAssetDumper::ExecuteFolderCommand(const TArray<FString>& Args)
 
 	IFileManager::Get().MakeDirectory(*RunRoot, /*Tree=*/true);
 	const FString ManifestPath = FPaths::Combine(RunRoot, TEXT("_manifest.txt"));
-	if (FFileHelper::SaveStringToFile(Manifest, *ManifestPath))
+	if (FFileHelper::SaveStringToFile(Manifest, *ManifestPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
 		UE_LOG(LogTemp, Display, TEXT("DumpBPFolder: manifest written to %s"), *ManifestPath);
 	}

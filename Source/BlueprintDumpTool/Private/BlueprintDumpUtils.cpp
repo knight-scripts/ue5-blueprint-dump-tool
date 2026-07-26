@@ -376,44 +376,44 @@ FString FBlueprintDumpUtils::FriendlyPinName(const UEdGraphPin* Pin)
 	}
 
 	// Pins generated from BLUEPRINT struct members carry an internal
-	// "_<index>_<32 hex GUID>" suffix (BackLedgeHeight_64_FA78930E...). Native pins
-	// never do, so stripping it is safe and leaves everything else untouched.
-	FString Name = Pin->PinName.ToString();
+	// "_<index>_<32 hex GUID>" group: "BackLedgeHeight_64_FA78930E4...". On a SPLIT
+	// member the group sits in the MIDDLE — "GridSizes_16_782DDA9B4..._X" — so scan for
+	// it rather than only stripping a tail. Native pin names never match this shape.
+	const FString Name = Pin->PinName.ToString();
 
-	int32 HexStart;
-	if (!Name.FindLastChar(TEXT('_'), HexStart))
-	{
-		return Name;
-	}
+	TArray<FString> Tokens;
+	Name.ParseIntoArray(Tokens, TEXT("_"), /*InCullEmpty=*/false);
 
-	const FString Hex = Name.Mid(HexStart + 1);
-	if (Hex.Len() != 32)
+	auto IsHex32 = [](const FString& Token)
 	{
-		return Name;
-	}
-	for (const TCHAR C : Hex)
-	{
-		const bool bHexDigit = (C >= TEXT('0') && C <= TEXT('9'))
-			|| (C >= TEXT('A') && C <= TEXT('F'))
-			|| (C >= TEXT('a') && C <= TEXT('f'));
-		if (!bHexDigit)
+		if (Token.Len() != 32)
 		{
-			return Name;
+			return false;
+		}
+		for (const TCHAR C : Token)
+		{
+			const bool bHexDigit = (C >= TEXT('0') && C <= TEXT('9'))
+				|| (C >= TEXT('A') && C <= TEXT('F'))
+				|| (C >= TEXT('a') && C <= TEXT('f'));
+			if (!bHexDigit)
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+
+	// Start at 1: never strip the leading token, that is the member's actual name
+	for (int32 i = 1; i + 1 < Tokens.Num(); ++i)
+	{
+		if (Tokens[i].IsNumeric() && IsHex32(Tokens[i + 1]))
+		{
+			Tokens.RemoveAt(i, 2);
+			return FString::Join(Tokens, TEXT("_"));
 		}
 	}
 
-	// Drop the GUID, then the "_<index>" that precedes it
-	FString Head = Name.Left(HexStart);
-	int32 IndexStart;
-	if (Head.FindLastChar(TEXT('_'), IndexStart))
-	{
-		const FString Index = Head.Mid(IndexStart + 1);
-		if (!Index.IsEmpty() && Index.IsNumeric())
-		{
-			return Head.Left(IndexStart);
-		}
-	}
-	return Head;
+	return Name;
 }
 
 namespace
@@ -617,7 +617,18 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 				&& InputPin->LinkedTo[0])
 			{
 				const FString Source = BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1);
-				return Source + TEXT(".") + FriendlyPinName(Pin);
+
+				// A SPLIT member reads as one more hop: CharacterProperties.LandVelocity.Z
+				FString Member = FriendlyPinName(Pin);
+				if (const UEdGraphPin* MemberParent = Pin->ParentPin)
+				{
+					const FString ParentName = FriendlyPinName(MemberParent);
+					if (Member.StartsWith(ParentName + TEXT("_")))
+					{
+						Member = ParentName + TEXT(".") + Member.RightChop(ParentName.Len() + 1);
+					}
+				}
+				return Source + TEXT(".") + Member;
 			}
 		}
 	}
@@ -1636,7 +1647,7 @@ namespace
 
 		if (Ctx.Depth >= MaxInstancedDepth)
 		{
-			Output += FString::Printf(TEXT("%s%s = %s  (depth limit — not expanded)\n"),
+			Output += FString::Printf(TEXT("%s%s = %s  (depth limit - not expanded)\n"),
 				*LinePrefix, *Label, *Value->GetClass()->GetName());
 			return 1;
 		}
