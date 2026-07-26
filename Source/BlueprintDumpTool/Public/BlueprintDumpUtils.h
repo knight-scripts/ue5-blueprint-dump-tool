@@ -76,6 +76,10 @@ public:
 	 *  literals by name. Empty when the pin carries no value. */
 	static FString FormatLiteralPinValue(const UEdGraphPin* Pin);
 
+	/** Pin name without the internal "_<index>_<32 hex GUID>" suffix that pins generated
+	 *  from BLUEPRINT struct members carry. Native pin names are returned untouched. */
+	static FString FriendlyPinName(const UEdGraphPin* Pin);
+
 	// --- Asset path normalization ---
 
 	/** Normalize asset path for LoadObject — handles plugin paths, /All prefix, .AssetName suffix. */

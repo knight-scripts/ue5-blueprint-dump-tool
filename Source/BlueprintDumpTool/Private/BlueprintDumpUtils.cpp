@@ -368,6 +368,54 @@ FString FBlueprintDumpUtils::ResolveOperatorFromTitle(const FString& Title)
 	return ResolveOperatorSymbol(FirstWord);
 }
 
+FString FBlueprintDumpUtils::FriendlyPinName(const UEdGraphPin* Pin)
+{
+	if (!Pin)
+	{
+		return FString();
+	}
+
+	// Pins generated from BLUEPRINT struct members carry an internal
+	// "_<index>_<32 hex GUID>" suffix (BackLedgeHeight_64_FA78930E...). Native pins
+	// never do, so stripping it is safe and leaves everything else untouched.
+	FString Name = Pin->PinName.ToString();
+
+	int32 HexStart;
+	if (!Name.FindLastChar(TEXT('_'), HexStart))
+	{
+		return Name;
+	}
+
+	const FString Hex = Name.Mid(HexStart + 1);
+	if (Hex.Len() != 32)
+	{
+		return Name;
+	}
+	for (const TCHAR C : Hex)
+	{
+		const bool bHexDigit = (C >= TEXT('0') && C <= TEXT('9'))
+			|| (C >= TEXT('A') && C <= TEXT('F'))
+			|| (C >= TEXT('a') && C <= TEXT('f'));
+		if (!bHexDigit)
+		{
+			return Name;
+		}
+	}
+
+	// Drop the GUID, then the "_<index>" that precedes it
+	FString Head = Name.Left(HexStart);
+	int32 IndexStart;
+	if (Head.FindLastChar(TEXT('_'), IndexStart))
+	{
+		const FString Index = Head.Mid(IndexStart + 1);
+		if (!Index.IsEmpty() && Index.IsNumeric())
+		{
+			return Head.Left(IndexStart);
+		}
+	}
+	return Head;
+}
+
 namespace
 {
 	/** Any data input worth resolving? Used to decide whether a depth-truncated node
@@ -398,10 +446,11 @@ namespace
 		}
 
 		// Split struct sub-pin: "ReturnValue_X" under parent "ReturnValue" -> ".X"
+		// (FriendlyPinName then drops any BP-struct GUID suffix: "Side_9_D749..." -> "Side")
 		if (const UEdGraphPin* Parent = Pin->ParentPin)
 		{
-			const FString Full = Pin->PinName.ToString();
-			const FString ParentName = Parent->PinName.ToString();
+			const FString Full = FBlueprintDumpUtils::FriendlyPinName(Pin);
+			const FString ParentName = FBlueprintDumpUtils::FriendlyPinName(Parent);
 			const FString Sub = Full.StartsWith(ParentName + TEXT("_"))
 				? Full.RightChop(ParentName.Len() + 1)
 				: Full;
@@ -421,7 +470,7 @@ namespace
 			}
 		}
 
-		const FString PinNameStr = Pin->PinName.ToString();
+		const FString PinNameStr = FBlueprintDumpUtils::FriendlyPinName(Pin);
 		return (DataOutputs > 1 && !PinNameStr.IsEmpty()) ? Expr + TEXT(".") + PinNameStr : Expr;
 	}
 }
@@ -543,7 +592,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 			// Try the output pin we were given — often named after the property
 			if (!Pin->PinName.IsNone())
 			{
-				FString PinNameStr = Pin->PinName.ToString();
+				FString PinNameStr = FriendlyPinName(Pin);
 				if (PinNameStr != TEXT("Output") && PinNameStr != TEXT("Result") && PinNameStr != TEXT("ReturnValue"))
 				{
 					return PinNameStr;
@@ -568,7 +617,7 @@ FString FBlueprintDumpUtils::BuildExpressionFromPin(UEdGraphPin* Pin, int32 MaxD
 				&& InputPin->LinkedTo[0])
 			{
 				const FString Source = BuildExpressionFromPin(InputPin->LinkedTo[0], MaxDepth, CurrentDepth + 1);
-				return Source + TEXT(".") + Pin->PinName.ToString();
+				return Source + TEXT(".") + FriendlyPinName(Pin);
 			}
 		}
 	}
@@ -802,7 +851,7 @@ FString FBlueprintDumpUtils::GetDataInputSummary(UEdGraphNode* Node)
 		FString PinName = Pin->GetDisplayName().ToString();
 		if (PinName.IsEmpty())
 		{
-			PinName = Pin->PinName.ToString();
+			PinName = FriendlyPinName(Pin);
 		}
 
 		if (Pin->LinkedTo.Num() > 0)
@@ -1124,7 +1173,7 @@ void FBlueprintDumpUtils::DumpEventGraphs(UBlueprint* Blueprint, FString& Output
 			{
 				if (Pin->Direction == EGPD_Output && !IsExecPin(Pin) && !Pin->bHidden)
 				{
-					Params.Add(Pin->PinName.ToString());
+					Params.Add(FriendlyPinName(Pin));
 				}
 			}
 
@@ -1205,7 +1254,7 @@ void FBlueprintDumpUtils::DumpFunctions(UBlueprint* Blueprint, FString& Output)
 			if (Pin->Direction == EGPD_Output && !IsExecPin(Pin) && !Pin->bHidden)
 			{
 				FString TypeStr = PinTypeToString(Pin->PinType);
-				InputParams.Add(FString::Printf(TEXT("%s %s"), *TypeStr, *Pin->PinName.ToString()));
+				InputParams.Add(FString::Printf(TEXT("%s %s"), *TypeStr, *FriendlyPinName(Pin)));
 			}
 		}
 

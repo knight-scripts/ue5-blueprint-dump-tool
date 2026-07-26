@@ -1078,7 +1078,7 @@ FString FAnimBPDumper::FormatDataPins(UEdGraphNode* Node)
 		FString PinName = Pin->GetDisplayName().ToString();
 		if (PinName.IsEmpty())
 		{
-			PinName = Pin->PinName.ToString();
+			PinName = FBlueprintDumpUtils::FriendlyPinName(Pin);
 		}
 
 		// Bound pin — the binding is the runtime truth, not the pin's default

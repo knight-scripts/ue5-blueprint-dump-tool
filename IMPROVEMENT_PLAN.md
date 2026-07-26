@@ -723,15 +723,20 @@ write-ups if any is ever revived. (JSON output was dropped outright: plain text 
    notify tracks) is the remaining item** and is what makes "how long is the deflect
    window" answerable.
 
-### Next session (2026-07-26 exit state — VERIFIED, tool is TCF-ready)
+### Next session (2026-07-26 exit state — TCF-READY, proven at 3083 assets)
 
-Compile + all acceptance done same day; N1/N2 fixed on top (⚠ that fix is itself
-uncompiled). Remaining work, in value order:
+M1 core, T1, T2, T3, N1 and N2 are all machine-2 verified. Only the GUID-suffix fix
+(4th round) is uncompiled. Remaining work, in value order:
 
-1. **Verify N1/N2** on a re-dump — the known-answers are listed in the changelog entry.
-2. **T4 — montage notify tracks.** The "how long is the deflect window" answer.
-3. Gap 1.5 (Property Access reflection) → 1.3b/1.4b → rest of Phase 2.
-4. An authored `&&`/`||` transition rule somewhere, to finally exercise the 0.8 parens fix.
+1. **Verify the GUID fix** — re-dump `BP_TraversalComponent` (or any traversal asset) and
+   confirm `TraversalCheckResult.BackLedgeHeight` with no hex tail. Cheap known-answer.
+2. **T4 — montage notify tracks.** The last blocker for combat-timing decode.
+3. Gap 1.5 (Property Access reflection) → `Not Equal (Enum)` → 1.3b/1.4b → rest of Phase 2.
+
+**The TCF pass is unblocked and de-risked** — /Game recursive on GASP is a bigger, more
+varied run than TCF's 319 assets. TCF still needs mounting first: it is a source-only copy
+on machine 1, so it wants either an engine-level install or a throwaway project with TCF +
+this plugin enabled.
 
 **The TCF pass itself is unblocked** — but note TCF is not mounted in the host project
 (source-only copy on machine 1). It needs the plugin installed to the engine, or a
@@ -773,7 +778,57 @@ missing data flow.
 
 ## Completed Improvements (Changelog)
 
-### 2026-07-26 (3rd round) — N1 + N2 (⚠ pending machine-2 compile + verification)
+### 2026-07-26 (4th round) — GUID suffix leak (found by the whole-game verification)
+
+`FriendlyPinName` strips the internal `_<index>_<32 hex GUID>` suffix that pins generated
+from **Blueprint** struct members carry; native pin names pass through untouched. Applied
+at every raw-`PinName` site: the N1 Break-struct rendering and `QualifyOutput` (both the
+split-sub-pin derivation and the `.PinName` append), function signatures, event parameter
+lists, the Property-Access pin fallback, and both `GetDisplayName` fallbacks.
+
+Found because N1 *worked*: surfacing member names for the first time also surfaced their
+GUIDs — `TraversalCheckResult.BackLedgeHeight_64_FA78930E475E1B89F0CCC5BC6F6043A3`, and
+`TriggerVisLog(E_FoleyEventSide Params_Side_9_D749B6B548D0A4778009A58DC6BD468F, …)`.
+494 occurrences across 21 of 3083 files — small, but concentrated in the traversal system,
+exactly the content worth reading. Same disease the T1 walker already cured for *property*
+names with `GetAuthoredNameForField`; this is the *pin* half.
+
+### 2026-07-26 (3rd round) — N1 + N2 — ✅ VERIFIED on the whole-game GASP dump
+
+`GASP_WholeGameDump.7z`: `DumpBPFolder /Game -recursive`, **3132 assets, 3083 dumped,
+49 skipped (all redirectors, each reasoned)**, manifest rows == assets found, 3083 files
+on disk. Largest single run to date and the first at TCF-like scale.
+
+- **N1 Break-struct** ✓ `CanSprint` opens with `CharacterInputState.WantsToSprint` where it
+  used to read `Break S Player Input State(CharacterInputState)`.
+- **N1 split pins** ✓ `CalculateMaxSpeed` now separates all four range endpoints:
+  `MapRangeClamped(StrafeSpeedMap, 0, 1, Select(…).X, Select(…).Y)` and
+  `MapRangeClamped(StrafeSpeedMap, 1, 2, Select(…).Y, Select(…).Z)`. Previously all four
+  were the same string. Also `NormalizedDeltaRotator(…).Yaw` in `CanSprint` — it was
+  invisible that only Yaw is compared.
+- **N2 depth 8** ✓ the formerly-bare `Select` is fully expanded:
+  `Conv_VectorToRotator(Select(GetCurrentAcceleration(), GetPendingMovementInputVector(),
+  IsLocallyControlled()))`. The `(...)` marker appears **23 times in 3083 files**, so depth
+  8 is close to sufficient and the residue is now visible rather than silent.
+- Guards: 0 `(cycle)`, 0 `(unresolved)`, 0 node-budget truncations; 48 `(already shown)`
+  from T1's cycle guard doing its job on instanced graphs.
+
+**⭐ 0.8 parenthesisation FINALLY exercised** — unvalidated since 2026-07-06 because GASP's
+CMC ABP has no compound rules. The whole-game dump has them, and they are correct:
+`(NOT IsCurrentAssetLooping(…)) && (GetCurrentAssetTimeRemaining(…) <= 0.750000)` and
+`Select(Value, Run, ((Value == Sprint) && Trj_IsCircling))`.
+
+**⭐ T2 curve dumper exercised, and it retired a measurement caveat.**
+`Curve_StrafeSpeedMap` dumps exact: `(0,0) (45,0) (80,1) (100,1) (135,2) (180,2)` linear.
+The host project's `SPRINT_DECODE_2026_07_25.md` §2d had that curve read off a screenshot
+with a ±3° caveat. Combined with the `.X/.Y/.Z` fix above, GASP's whole directional speed
+law is now readable from text: the curve maps |direction| → 0..2, and `CalculateMaxSpeed`
+lerps `Speeds.X`→`.Y` over 0..1 and `.Y`→`.Z` over 1..2.
+
+Also visible in real rules and already filed under Phase 2: `Not Equal (Enum)(A, B)` still
+renders function-style instead of `A != B`.
+
+### 2026-07-26 (3rd round, as committed) — N1 + N2
 
 **N1 — output-pin identity.** New `QualifyOutput` helper, applied at every return site in
 `BuildExpressionFromPin` that can serve a multi-output node (7 sites):
