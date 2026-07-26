@@ -780,7 +780,53 @@ missing data flow.
 
 ## Completed Improvements (Changelog)
 
-### 2026-07-26 (8th round) — T4 animation assets (⚠ pending machine-2 compile)
+### 2026-07-26 (9th round) — T4 VERIFIED, plus the duplication it exposed
+
+**T4 works.** Verified on Summoning (92 anim assets), GASP (1578) and TCF (0 — see below).
+
+⭐ **The H9 check now exists in text.** `AS_Run_Turn_L90_Rfoot` dumps its full instrumentation
+stack, and every §8 claim in `CLAUDE.md` is now verifiable rather than asserted:
+```
+RemainingTurnYaw   : 48 key(s)  value[-90.0000..0.0000]   time[0.0000..3.8667]
+TurnYawWeight      :  2 key(s)  value[0.0000..1.0000]     time[0.0000..1.5000]
+movedata_speed     : 25 key(s)  value[286.0515..375.0000] time[0.0333..3.8667]
+contact_l/contact_r: 95 / 98 key(s)
+Distance           : 103 key(s) value[0.0000..1137.0325]
+phase, enable_warping, steeringtargettime, disable_additiveleans
+```
+The L90 clip's authored turn is exactly -90 deg; rotation authority dies at 1.5s of a
+3.87s clip; the clip's authored speed dips to 286 and recovers to 375. ⭐ It also settles
+the `CLAUDE.md` §8 spelling flag: the curve **is** `disable_additiveleans`, trailing S.
+
+**Montage half verified** on GASP's interaction montages — a notify STATE prints its window
+*and* its instanced payload, which is precisely the `ANS_AttackTrace` shape:
+```
+t=0.0001  dur=4.3143  end=4.3144  track=1 '2'  MotionWarping (AnimNotifyState_MotionWarping)
+    RootMotionModifier = RootMotionModifier_PrecomputedWarp
+      TranslationWarpingCurve = (CurveType=EaseInOut,EndRatio=0.807407)  (default: (EndRatio=1.000000))
+      RotationWarpingCurve = (StartRatio=0.600000,EndRatio=0.884615)     (default: (EndRatio=1.000000))
+      bEnableSteering = True  (default: False)
+      WarpTargetName = SmartObject  (default: None)
+```
+
+⚠ **TCF ships ZERO montages** — 318 assets, no `AnimMontage` among them. Its notify
+*classes* are there (`ANS_AttackTrace` as a Blueprint), but the montages that carry them
+live in the demo/game content, not the plugin. So "how long is the deflect window" needs
+**TCF's demo content dumped**, not the plugin folder. T4 is proven by GASP's equivalent.
+
+**Two defects this exposed, both fixed:**
+- **F-6 the trailing generic diff duplicated the structured sections.** 179,352 of 448,929
+  anim-dump lines (**40%**) sat after `=== Properties`, re-printing `Notifies[...]` (12,618
+  lines) and `AnimNotifyTracks` (1,670) — and re-running T1's instanced recursion, so every
+  notify's payload appeared twice. Exactly the F-4 disease I had already fixed for BT nodes
+  and then reintroduced here. The BT filter is now generalised into
+  `AppendFilteredProperties`, which skips named top-level entries **and everything nested
+  under them** (indent-aware, so `Notifies[0]`'s children go with it). Both call sites use it.
+- Skeleton notifies (a NAME with no class object) printed `((none))`, which reads as a
+  broken reference rather than the normal thing it is. 616 occurrences; now the class
+  suffix is simply omitted.
+
+### 2026-07-26 (8th round) — T4 animation assets
 
 The last M2 item. Handles **any `UAnimSequenceBase`** — montages, sequences, composites —
 not just montages, because our own window forensics (H10 commitment windows, the jump

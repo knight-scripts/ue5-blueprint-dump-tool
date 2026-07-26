@@ -99,43 +99,89 @@ namespace
 		FBlueprintDumpUtils::DumpObjectPropertyDiffs(Object, nullptr, Prefix, Output);
 	}
 
-	/** Behavior-tree nodes carry structural back-pointers and child arrays that the tree
-	 *  walk already renders; printing them per node buries the authored settings. */
-	void AppendBTNodeProperties(UObject* Node, const FString& Prefix, FString& Output)
+	/** "PropName", "PropName[3]", "PropName = x", "PropName: 3 element(s)" — but not
+	 *  "PropNameSomethingElse". */
+	bool IsPropertyLine(const FString& Trimmed, const FString& Name)
 	{
-		if (!Node)
+		if (!Trimmed.StartsWith(Name))
+		{
+			return false;
+		}
+		if (Trimmed.Len() == Name.Len())
+		{
+			return true;
+		}
+		const TCHAR Next = Trimmed[Name.Len()];
+		return Next == TEXT('[') || Next == TEXT(' ') || Next == TEXT(':') || Next == TEXT('=');
+	}
+
+	/** Diff an object's properties, omitting named top-level entries AND everything nested
+	 *  under them. Used wherever a structured section already renders that data: repeating
+	 *  it as raw property text buries whatever the section did not cover, which is the
+	 *  entire reason to print the diff at all. */
+	void AppendFilteredProperties(UObject* Object, const FString& Prefix,
+		const TArray<FString>& SkipNames, FString& Output)
+	{
+		if (!Object)
 		{
 			return;
 		}
 
 		FString All;
-		FBlueprintDumpUtils::DumpObjectPropertyDiffs(Node, nullptr, Prefix, All);
-
-		static const TCHAR* StructuralPrefixes[] =
-		{
-			TEXT("TreeAsset ="), TEXT("ParentNode ="), TEXT("Children ="),
-			TEXT("Services ="), TEXT("Decorators ="), TEXT("DecoratorOps ="),
-		};
+		FBlueprintDumpUtils::DumpObjectPropertyDiffs(Object, nullptr, Prefix, All);
 
 		TArray<FString> Lines;
 		All.ParseIntoArrayLines(Lines, /*InCullEmpty=*/false);
+
+		const int32 BaseIndent = Prefix.Len();
+		bool bSkippingBlock = false;
+
 		for (const FString& Line : Lines)
 		{
-			const FString Trimmed = Line.TrimStart();
-			bool bStructural = false;
-			for (const TCHAR* Skip : StructuralPrefixes)
+			if (Line.IsEmpty())
 			{
-				if (Trimmed.StartsWith(Skip))
+				continue;
+			}
+
+			int32 Indent = 0;
+			while (Indent < Line.Len() && Line[Indent] == TEXT(' '))
+			{
+				++Indent;
+			}
+
+			// A line at (or above) the base indent starts a new top-level entry, which
+			// also ends any block we were skipping
+			if (Indent <= BaseIndent)
+			{
+				const FString Trimmed = Line.TrimStart();
+				bSkippingBlock = false;
+				for (const FString& Skip : SkipNames)
 				{
-					bStructural = true;
-					break;
+					if (IsPropertyLine(Trimmed, Skip))
+					{
+						bSkippingBlock = true;
+						break;
+					}
 				}
 			}
-			if (!bStructural && !Trimmed.IsEmpty())
+
+			if (!bSkippingBlock)
 			{
 				Output += Line + TEXT("\n");
 			}
 		}
+	}
+
+	/** Behavior-tree nodes carry structural back-pointers and child arrays that the tree
+	 *  walk already renders; printing them per node buries the authored settings. */
+	void AppendBTNodeProperties(UObject* Node, const FString& Prefix, FString& Output)
+	{
+		static const TArray<FString> Skip =
+		{
+			TEXT("TreeAsset"), TEXT("ParentNode"), TEXT("Children"),
+			TEXT("Services"), TEXT("Decorators"), TEXT("DecoratorOps"),
+		};
+		AppendFilteredProperties(Node, Prefix, Skip, Output);
 	}
 
 	FString InterpModeToString(TEnumAsByte<ERichCurveInterpMode> Mode)
@@ -219,12 +265,14 @@ namespace
 			UObject* NotifyObject = StateNotify
 				? static_cast<UObject*>(StateNotify)
 				: static_cast<UObject*>(InstantNotify);
-			const FString ClassName = NotifyObject
-				? NotifyObject->GetClass()->GetName()
-				: TEXT("(none)");
+			// Skeleton notifies are a NAME with no class object — printing "(none)" for
+			// them reads like a missing reference rather than the normal thing it is.
+			const FString ClassSuffix = NotifyObject
+				? FString::Printf(TEXT(" (%s)"), *NotifyObject->GetClass()->GetName())
+				: FString();
 
-			Output += FString::Printf(TEXT("  %s  %s  %s (%s)\n"),
-				*TimeStr, *TrackLabel, *Event.NotifyName.ToString(), *ClassName);
+			Output += FString::Printf(TEXT("  %s  %s  %s%s\n"),
+				*TimeStr, *TrackLabel, *Event.NotifyName.ToString(), *ClassSuffix);
 
 			// The notify's OWN properties — instanced attack/feel properties live here,
 			// so T1's recursion is what makes this worth dumping at all.
@@ -545,13 +593,23 @@ FString FAssetDumper::DumpLoadedAsset(UObject* Asset)
 		AppendAnimCurves(Anim, Output);
 
 		// Root motion, looping, interpolation and friends ride the generic diff rather
-		// than a hand-listed set that would drift against the engine.
-		Output += TEXT("=== Properties (differ from class defaults) ===\n");
-		if (FBlueprintDumpUtils::DumpObjectPropertyDiffs(Asset, nullptr, TEXT("  "), Output) == 0)
+		// than a hand-listed set that would drift against the engine — but everything the
+		// structured sections above already rendered is filtered out. Unfiltered, the
+		// notify array alone re-printed every notify's instanced properties a second time.
+		static const TArray<FString> SectionOwned =
 		{
-			Output += TEXT("  (none - every property is at its class default)\n");
-		}
-		Output += TEXT("  (not listed = class default)\n\n");
+			TEXT("Notifies"), TEXT("CompositeSections"), TEXT("SlotAnimTracks"),
+			TEXT("AnimNotifyTracks"), TEXT("BranchingPointMarkers"), TEXT("RawCurveData"),
+		};
+
+		FString Properties;
+		AppendFilteredProperties(Asset, TEXT("  "), SectionOwned, Properties);
+
+		Output += TEXT("=== Properties (differ from class defaults) ===\n");
+		Output += Properties.IsEmpty()
+			? TEXT("  (none - every property is at its class default)\n")
+			: Properties;
+		Output += TEXT("  (not listed = class default, or shown in a section above)\n\n");
 		return Output;
 	}
 
