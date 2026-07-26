@@ -864,6 +864,34 @@ missing data flow.
 
 ## Completed Improvements (Changelog)
 
+### 2026-07-26 (11th round) — ALS-Refactored as a 5th test project; D-3 external actors
+
+ALS-Refactored (570 assets) run purely as a bug hunt. **Every fixed defect stayed fixed**:
+0 UTF-16, 0 GUID groups, 0 `(cycle)` / `(unresolved)` / `(depth limit)` / node-budget
+truncations, 0 `((none))`, 0 F-6 section leaks, max line **730 chars**. The 5 `NewEnumerator`
+and 305 truncations are the 10th round's fixes, still uncompiled. Curve, AnimBP and montage
+paths all render correctly — `AB_Als_PostProcessing` at 22 lines with empty EventGraph and
+Functions sections is *correct*, since ALS keeps its logic in C++ (README "Architecture
+Insight").
+
+**D-3 — One-File-Per-Actor packages were being dumped as assets.** UE5's World Partition /
+OFPA writes one package per placed actor under `__ExternalActors__` / `__ExternalObjects__`.
+These are **level content instances, not assets**: a placed cube's `ActorLabel`, `FolderGuid`
+and mesh override. In ALS they are **229 of 570 dumps (40%)**, and they bury the 26 AnimBPs
+and 13 Blueprints that a decode actually wants.
+
+⚠ This is not an ALS quirk — **our own project has `Content/__ExternalActors__`**, so any
+`DumpBPFolder /Game -recursive` on Summoning inherits the same noise.
+
+Now skipped by default with a **visible manifest row**
+(`skipped (external actor package; -external to include)`) and a policy line in the manifest
+header, per the silence-is-a-bug-signal doctrine — the count still reconciles. Pass
+`-external` to include them, or `DumpBP` a single one by path when a placed-actor override
+actually matters. Contained to the batch command; zero blast radius on the diff walker.
+
+**Known-answers:** ALS re-run drops to ~341 dumped with 229 skipped rows carrying the
+external-actor reason, and rows still sum to 570; a `-external` run reproduces today's 570.
+
 ### 2026-07-26 (10th round) — ⭐ TCF combat timing is READABLE. Two last defects fixed.
 
 9th round verified: F-6 section-leak **14,375 -> 0** lines, `((none))` **616 -> 0**,

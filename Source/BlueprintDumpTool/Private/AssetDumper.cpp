@@ -717,10 +717,11 @@ void FAssetDumper::ExecuteFolderCommand(const TArray<FString>& Args)
 	if (Args.Num() < 1)
 	{
 		UE_LOG(LogTemp, Display, TEXT(""));
-		UE_LOG(LogTemp, Display, TEXT("Usage: DumpBPFolder /Game/Path [-recursive] [-filter=ClassName]"));
+		UE_LOG(LogTemp, Display, TEXT("Usage: DumpBPFolder /Game/Path [-recursive] [-external] [-filter=ClassName]"));
 		UE_LOG(LogTemp, Display, TEXT(""));
 		UE_LOG(LogTemp, Display, TEXT("  Dumps every asset under a content path into a mirrored tree in"));
 		UE_LOG(LogTemp, Display, TEXT("  Saved/BlueprintDumps/, plus a _manifest.txt listing every asset."));
+		UE_LOG(LogTemp, Display, TEXT("  One-File-Per-Actor packages are skipped unless -external is passed."));
 		UE_LOG(LogTemp, Display, TEXT("  Example: DumpBPFolder /TempestCombatFramework -recursive"));
 		UE_LOG(LogTemp, Display, TEXT(""));
 		return;
@@ -734,6 +735,7 @@ void FAssetDumper::ExecuteFolderCommand(const TArray<FString>& Args)
 	}
 
 	bool bRecursive = false;
+	bool bIncludeExternalActors = false;
 	FString ClassFilter;
 	for (int32 i = 1; i < Args.Num(); ++i)
 	{
@@ -741,6 +743,10 @@ void FAssetDumper::ExecuteFolderCommand(const TArray<FString>& Args)
 		if (Arg.Equals(TEXT("-recursive"), ESearchCase::IgnoreCase) || Arg.Equals(TEXT("-r"), ESearchCase::IgnoreCase))
 		{
 			bRecursive = true;
+		}
+		else if (Arg.Equals(TEXT("-external"), ESearchCase::IgnoreCase))
+		{
+			bIncludeExternalActors = true;
 		}
 		else if (Arg.StartsWith(TEXT("-filter="), ESearchCase::IgnoreCase))
 		{
@@ -786,6 +792,19 @@ void FAssetDumper::ExecuteFolderCommand(const TArray<FString>& Args)
 		const FString AssetName = AssetData.AssetName.ToString();
 		const FString RegistryClass = AssetData.AssetClassPath.GetAssetName().ToString();
 		const FString PackagePath = AssetData.PackagePath.ToString();
+
+		// One-File-Per-Actor packages are LEVEL CONTENT, not assets: a placed cube's
+		// ActorLabel and FolderGuid. In ALS-Refactored they are 40% of the run (229 of
+		// 570) and bury the AnimBPs worth reading. Skipped by default, VISIBLY -- pass
+		// -external to include them, or DumpBP a single one by path.
+		if (!bIncludeExternalActors
+			&& (PackagePath.Contains(TEXT("/__ExternalActors__/"))
+				|| PackagePath.Contains(TEXT("/__ExternalObjects__/"))))
+		{
+			AddRow(AssetName, RegistryClass, TEXT("skipped (external actor package; -external to include)"));
+			++SkippedCount;
+			continue;
+		}
 
 		// Class filter runs BEFORE loading — a filtered run should not pay to load
 		if (!ClassFilter.IsEmpty() && !RegistryClass.Equals(ClassFilter, ESearchCase::IgnoreCase))
@@ -843,6 +862,8 @@ void FAssetDumper::ExecuteFolderCommand(const TArray<FString>& Args)
 	{
 		Manifest += FString::Printf(TEXT("Class filter: %s\n"), *ClassFilter);
 	}
+	Manifest += FString::Printf(TEXT("External actor packages: %s\n"),
+		bIncludeExternalActors ? TEXT("included") : TEXT("skipped (-external to include)"));
 	Manifest += FString::Printf(TEXT("Assets found: %d   dumped: %d   skipped: %d\n\n"),
 		Assets.Num(), DumpedCount, SkippedCount);
 	Manifest += FString::Printf(TEXT("%-44s  %-28s  %s\n"), TEXT("ASSET"), TEXT("TYPE"), TEXT("STATUS"));
