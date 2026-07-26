@@ -780,6 +780,50 @@ missing data flow.
 
 ## Completed Improvements (Changelog)
 
+### 2026-07-26 (10th round) — ⭐ TCF combat timing is READABLE. Two last defects fixed.
+
+9th round verified: F-6 section-leak **14,375 -> 0** lines, `((none))` **616 -> 0**,
+controls intact (`bEnableRootMotion` 1414, `CommonTargetFrameRate` 168).
+
+⭐⭐ **The question this milestone existed to answer is answered.** TCF's plugin folder ships
+no montages, but the **demo samples do** (Mixamo 36, Samurai 57), and one attack montage now
+reads as a complete combat spec:
+
+```
+t=0.0001  dur=0.8147  ANS_BufferInputs_C
+    Input Buffer Type = InstantInputFire  (default: HighestPriorityInput)
+    Buffer Info[0] (BufferInfo)
+      AllowedInput = .../AttackRelease_Input
+      InputBufferSpecialProperty = BP_PlayAnimationBufferProperty_C
+        Anim Montage to Play = .../GhostSamurai_APose_Attack04_Root_Montage1   <- the combo link
+t=0.8920  dur=0.2497  ANS_TempestStandardRotation_C
+    RotationPropertiesToPerform[0..2] = RotateToTargetedActor / RotateToInputDirection / RotateToCombatTarget
+t=0.9276  dur=0.3125  ANS_Trace_C                                              <- the attack window, 312 ms
+    Trace to Control = ((TagName="Trace.Right Hand Weapon"))
+    AssignedAttackProperty -> AttackProperty = BP_NormalAttackProperty_C
+      ImpactProperties[0] -> BP_DamagePerImpactProperty_C
+        Damage Applications Per Impact Result =
+          Impact.Result.Block -> Attribute.Posture 20.0                        <- posture-on-block
+      ImpactProperties[1] -> BP_HitFeelPerTargetProperty_C
+        Hit Feel Per Target[0].Target Gameplay Tag = Character.AI.Enemy
+```
+
+Six levels of instanced nesting, rendered correctly. Window timings, the combo graph, the
+rotation policy and the posture numbers are all in text. The whole TCF notify vocabulary is
+present across the demos: `ANS_Trace` (44), `ANS_BufferInputs` (112),
+`ANS_TempestStandardRotation` (80), `ANS_AddCombatStatus` (30), `AN_AnnounceAttack` (30).
+
+**Two defects that read-through exposed, both fixed:**
+- **D-1 Blueprint enum property values dumped their INTERNAL name** —
+  `Swing Direction = NewEnumerator13  (default: NewEnumerator3)`. 586 occurrences.
+  `ResolveEnumPinValue` had always done this for *pins*; the property side never did. New
+  `TryExportEnumValue` handles `FEnumProperty` and enum-typed `FByteProperty`, preferring
+  the display name and falling back to the internal name rather than to nothing.
+- **D-2 the 220-char value cap was cutting combat data mid-record.** The damage map above
+  lost its second impact result to truncation. 2979 values were truncated. Cap raised to
+  **1000** with the marker kept. ⚠ This is a mitigation, not the fix: the right answer is
+  structural recursion into map/struct values instead of exporting them as one line. Filed.
+
 ### 2026-07-26 (9th round) — T4 VERIFIED, plus the duplication it exposed
 
 **T4 works.** Verified on Summoning (92 anim assets), GASP (1578) and TCF (0 — see below).

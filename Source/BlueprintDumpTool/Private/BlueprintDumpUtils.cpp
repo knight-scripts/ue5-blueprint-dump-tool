@@ -8,6 +8,7 @@
 #include "Components/ActorComponent.h"
 
 #include "UObject/UnrealType.h"
+#include "UObject/EnumProperty.h"
 #include "UObject/PropertyPortFlags.h"
 #include "UObject/Package.h"
 #include "UObject/StructOnScope.h"
@@ -1625,6 +1626,12 @@ namespace
 	// Instanced graphs can nest (attack -> traits -> impacts); bound the descent.
 	constexpr int32 MaxInstancedDepth = 4;
 
+	// Exported value text cap. 220 was cutting nested combat data mid-record (a damage
+	// map lost its second impact result), and these long values are exactly the ones
+	// worth reading. The proper fix is structural recursion into map/struct values;
+	// until then a larger cap plus the "(truncated)" marker keeps them honest.
+	constexpr int32 MaxExportedValueChars = 1000;
+
 	/** Shared state for one diff run: cycle guard + current instanced nesting depth. */
 	struct FDiffContext
 	{
@@ -1652,8 +1659,58 @@ namespace
 		return nullptr;
 	}
 
+	/** Enum-typed properties export their INTERNAL name, which for a Blueprint enum is
+	 *  "NewEnumerator13" — the author's label is the display name. The pin-side equivalent
+	 *  of this is ResolveEnumPinValue; this is the property side. */
+	bool TryExportEnumValue(const FProperty* Prop, const void* ValuePtr, FString& Out)
+	{
+		const UEnum* Enum = nullptr;
+		int64 Value = 0;
+
+		if (const FEnumProperty* EnumProp = CastField<FEnumProperty>(Prop))
+		{
+			Enum = EnumProp->GetEnum();
+			Value = EnumProp->GetUnderlyingProperty()->GetSignedIntPropertyValue(ValuePtr);
+		}
+		else if (const FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+		{
+			if (ByteProp->Enum)
+			{
+				Enum = ByteProp->Enum;
+				Value = ByteProp->GetSignedIntPropertyValue(ValuePtr);
+			}
+		}
+
+		if (!Enum)
+		{
+			return false;
+		}
+
+		const FString Display = Enum->GetDisplayNameTextByValue(Value).ToString();
+		const FString Internal = Enum->GetNameStringByValue(Value);
+
+		// Prefer the display name; fall back to the internal one rather than nothing
+		if (!Display.IsEmpty() && !Display.StartsWith(TEXT("NewEnumerator")))
+		{
+			Out = Display;
+			return true;
+		}
+		if (!Internal.IsEmpty())
+		{
+			Out = Internal;
+			return true;
+		}
+		return false;
+	}
+
 	FString ExportValue(const FProperty* Prop, const void* ValuePtr, UObject* ExportOwner)
 	{
+		FString EnumStr;
+		if (TryExportEnumValue(Prop, ValuePtr, EnumStr))
+		{
+			return EnumStr;
+		}
+
 		// HARD object references: print the asset path, not ExportText's verbose form.
 		// Soft/weak refs stay on the generic path — they resolve to null when unloaded,
 		// which would alias two different soft paths.
@@ -1670,9 +1727,9 @@ namespace
 		{
 			ValueStr = TEXT("(empty)");
 		}
-		else if (ValueStr.Len() > 220)
+		else if (ValueStr.Len() > MaxExportedValueChars)
 		{
-			ValueStr = ValueStr.Left(220) + TEXT("... (truncated)");
+			ValueStr = ValueStr.Left(MaxExportedValueChars) + TEXT("... (truncated)");
 		}
 		return ValueStr;
 	}
