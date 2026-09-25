@@ -9,8 +9,15 @@
 #include "Animation/AnimBlueprint.h"
 #include "Engine/DataAsset.h"
 #include "Engine/DataTable.h"
-#include "Engine/UserDefinedStruct.h"
 #include "Engine/UserDefinedEnum.h"
+#include "Runtime/Launch/Resources/Version.h"
+
+// UE 5.8 moved UserDefinedStruct from Engine to CoreUObject/StructUtils (the old path is gone).
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+#include "StructUtils/UserDefinedStruct.h"
+#else
+#include "Engine/UserDefinedStruct.h"
+#endif
 
 #include "Curves/RichCurve.h"
 #include "Curves/CurveFloat.h"
@@ -453,13 +460,19 @@ UObject* FAssetDumper::LoadAsset(const FString& AssetPath)
 	if (UPackage* Package = Cast<UPackage>(Asset))
 	{
 		UObject* Found = nullptr;
-		ForEachObjectWithOuter(Package, [&Found](UObject* Inner)
+		auto FindAsset = [&Found](UObject* Inner)
 		{
 			if (!Found && Inner->IsAsset())
 			{
 				Found = Inner;
 			}
-		}, /*bIncludeNestedObjects=*/false);
+		};
+		// UE 5.8 deprecated the bool overload in favour of EGetObjectsFlags (absent before 5.8).
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+		ForEachObjectWithOuter(Package, FindAsset, EGetObjectsFlags::None);
+#else
+		ForEachObjectWithOuter(Package, FindAsset, /*bIncludeNestedObjects=*/false);
+#endif
 		Asset = Found;
 	}
 
