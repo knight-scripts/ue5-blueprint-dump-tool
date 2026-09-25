@@ -7,7 +7,6 @@
 	"Category": "Editor",
 	"CreatedBy": "knight-scripts",
 	"CreatedByURL": "https://github.com/knight-scripts/ue5-blueprint-dump-tool",
-	"EngineVersion": "5.7.0",
 	"Modules": [
 		{
 			"Name": "BlueprintDumpTool",
